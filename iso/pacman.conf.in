@@ -1,0 +1,18 @@
+# Arch's own repositories, and AximOS's packages, built by make packages.
+[options]
+CacheDir = @CACHE@
+HoldPkg = pacman glibc
+Architecture = auto
+ParallelDownloads = 5
+SigLevel = Required DatabaseOptional
+LocalFileSigLevel = Optional
+
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+
+[aximos]
+SigLevel = Optional TrustAll
+Server = file://@REPO@

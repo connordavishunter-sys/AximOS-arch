@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=AximOS
+Comment=The AximOS desktop
+Exec=wm
+Type=Application
+DesktopNames=AximOS

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="aximos_shell_v1">
+  <copyright>Part of AximOS.</copyright>
+
+  <interface name="aximos_shell_v1" version="1">
+    <description summary="what AximOS's desktop does beyond Wayland's own">
+      libgui's apps use it for what wm does that Wayland has no protocol for:
+      notifications, blur behind see-through windows, the screen's size and
+      scale, settings changing, and the log-in screen unlocking the desktop.
+    </description>
+
+    <request name="destroy" type="destructor"/>
+
+    <request name="set_translucent">
+      <description summary="blur what's under the window through its pixels">
+        With it on, wm shows what's under the surface blurred, as much as each
+        pixel's alpha leaves it see-through.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="on" type="uint"/>
+    </request>
+
+    <request name="notify">
+      <description summary="show a notification">
+        From the window it's about, if any, whose icon it gets. With a label,
+        it has a button that runs command, as Super+R would.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="title" type="string"/>
+      <arg name="body" type="string"/>
+      <arg name="label" type="string" allow-null="true"/>
+      <arg name="command" type="string" allow-null="true"/>
+    </request>
+
+    <request name="settings_changed">
+      <description summary="the settings were saved, so wm and every app load them again"/>
+    </request>
+
+    <request name="unlock">
+      <description summary="from the log-in or lock screen wm started, once someone's in"/>
+    </request>
+
+    <event name="screen">
+      <description summary="the desktop's size, in its own pixels">
+        Sent on binding and whenever it changes. The screen's pixels are scale
+        times as wide and high, and can_set_mode is 1 if its resolution can change.
+      </description>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="can_set_mode" type="uint"/>
+      <arg name="scale" type="uint"/>
+    </event>
+
+    <event name="settings_changed">
+      <description summary="load the settings again"/>
+    </event>
+  </interface>
+</protocol>

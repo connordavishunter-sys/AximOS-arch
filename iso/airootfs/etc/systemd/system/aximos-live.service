@@ -1,0 +1,11 @@
+[Unit]
+Description=Give the live account its password, aximos, for the lock screen
+After=systemd-sysusers.service
+Before=greetd.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo aximos:aximos | chpasswd'
+
+[Install]
+WantedBy=sysinit.target

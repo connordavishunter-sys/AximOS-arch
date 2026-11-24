@@ -1,0 +1,31 @@
+# Arch's base, and what boots the live system
+base
+linux
+linux-firmware
+intel-ucode
+amd-ucode
+mkinitcpio
+mkinitcpio-archiso
+sudo
+# Services: systemd's, NetworkManager, PipeWire with WirePlumber, and UPower
+networkmanager
+pipewire
+pipewire-pulse
+pipewire-alsa
+wireplumber
+upower
+polkit
+# The GPU: NVIDIA's open modules for the RTX 4070, and Mesa for the rest
+nvidia-open
+mesa
+# Logging in: greetd, which runs wm's own log-in screen
+greetd
+# Apps from Arch that run in wm's windows, Wayland's and X's
+foot
+xterm
+xorg-xwayland
+ttf-dejavu
+# AximOS
+aximos-libgui
+aximos-apps
+aximos-desktop

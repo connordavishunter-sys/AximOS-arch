@@ -1,0 +1,12 @@
+# The live system logs straight in as aximos, and after logging out, wm's own log-in
+# screen logs in again. What wm says goes to the journal, as wm.
+[terminal]
+vt = 1
+
+[default_session]
+command = "systemd-cat -t wm wm --login"
+user = "greeter"
+
+[initial_session]
+command = "systemd-cat -t wm wm"
+user = "aximos"

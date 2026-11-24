@@ -1,0 +1,4 @@
+#%PAM-1.0
+# The lock screen checks the password of whoever is logged in.
+auth     required  pam_unix.so
+account  required  pam_unix.so

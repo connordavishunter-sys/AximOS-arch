@@ -1,0 +1,58 @@
+# AximOS's desktop, as Arch packages: libgui and what it shares, its apps, and the
+# desktop itself, wm, with its log-in screen. make packages builds them in a clean
+# chroot from a tarball of the tree, aximos.tar.gz, beside this.
+
+pkgbase=aximos
+pkgname=(aximos-libgui aximos-apps aximos-desktop)
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='AximOS desktop'
+arch=(x86_64)
+url='https://github.com/connordavishunter-sys/AximOS-arch'
+license=(custom)
+makedepends=(wlroots0.20 wayland wayland-protocols libinput libxkbcommon pixman libdrm libpulse pam stb
+             mpg123 lame flac libvorbis libogg opus faad2 faac libxcrypt)
+source=(aximos.tar.gz)
+sha256sums=(SKIP)
+
+build() {
+    make -C aximos PREFIX=/usr
+}
+
+# Everything's installed once, then shared out between the packages.
+_install_all() {
+    [[ -d $srcdir/staged ]] || make -C "$srcdir/aximos" PREFIX=/usr DESTDIR="$srcdir/staged" install
+}
+
+_take() {
+    local path
+    for path; do
+        mkdir -p "$pkgdir/$(dirname "$path")"
+        cp -a "$srcdir/staged/$path" "$pkgdir/$path"
+    done
+}
+
+package_aximos-libgui() {
+    pkgdesc='AximOS libgui: the toolkit its apps draw with, as Wayland clients, and its sound library'
+    depends=(wayland libxkbcommon libpulse libxcrypt mpg123 lame flac libvorbis libogg opus faad2 faac libwebp)
+    _install_all
+    _take usr/lib/libgui.so usr/lib/libaximos.so usr/lib/libaudio.so usr/lib/aximos/codecs usr/include/aximos \
+        usr/share/aximos/fonts usr/share/aximos/icons
+}
+
+package_aximos-apps() {
+    pkgdesc='AximOS apps: Terminal, Files, Editor, Paint, Viewer, Player, Calculator, Settings, Tasks and Snake'
+    depends=(aximos-libgui)
+    _install_all
+    _take usr/lib/aximos/apps usr/bin/run usr/bin/notify usr/share/aximos/example_music
+}
+
+package_aximos-desktop() {
+    pkgdesc='AximOS desktop: wm, a Wayland compositor on wlroots, with XWayland, and its log-in screen'
+    depends=(aximos-libgui aximos-apps wlroots0.20 libinput pixman libdrm pam xorg-xwayland pipewire-pulse)
+    optdepends=('greetd: to log in with wm'"'"'s own log-in screen')
+    backup=(etc/pam.d/aximos-lock)
+    _install_all
+    _take usr/bin/wm usr/lib/aximos/login usr/share/aximos/wallpapers usr/share/wayland-sessions \
+        usr/lib/systemd/logind.conf.d etc/pam.d/aximos-lock
+}
