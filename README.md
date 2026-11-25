@@ -22,9 +22,10 @@ brightness keys and slider set the backlight through logind, as its file is root
 screens 2560 wide or more, everything's drawn at 2x, at the screen's own resolution:
 wm, libgui's apps, whose canvases are laid out as at 1x and drawn twice as sharp, and
 Wayland apps such as foot, at their own 2x. X apps draw at 1x, made twice the size.
+The live ISO's installer, in System, puts AximOS on a drive: in place of an AximOS
+already on it, in its free space, or over the whole of it.
 
-Still to come: Settings as a front end for NetworkManager, UPower and timedated; an
-installer; dragging
+Still to come: Settings as a front end for NetworkManager, UPower and timedated; dragging
 files between wm's desktop and apps; and screens beyond the first.
 
 ## How it fits together
@@ -50,6 +51,14 @@ files between wm's desktop and apps; and screens beyond the first.
 - **The network** (`user/wm/network.c`) is NetworkManager's, over D-Bus with sd-bus, on
   wm's own poll loop. Networks joined from the panel belong to whoever's logged in, as
   NetworkManager lets them make those without an admin's password.
+- **Installing**: the installer (`user/installer`) asks which drive, how, the first
+  account, the computer's name and the time zone, then runs `aximos-install`
+  (`system/aximos-install`) as root. That copies the live system onto an ext4 root,
+  takes out what only the live system has (its account, logging in by itself, the
+  serial port's root shell, the tests' tools and itself, and the development tools
+  unless they were asked for), and makes the account. Limine boots it, from AximOS's
+  own boot partition, with a menu of every other system's EFI loader it finds, so a
+  system beside it, such as CachyOS, stays in the menu.
 - **Logging in**: greetd runs `wm --login`, whose log-in screen (`user/login`) logs in
   through greetd's socket. The lock screen checks the password with PAM.
 

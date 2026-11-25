@@ -296,7 +296,8 @@ static void collect_zones(const char *relative, char ***names, int *count, int *
         if (stat(path, &st) < 0)
             continue;
         if (S_ISDIR(st.st_mode)) {
-            collect_zones(name, names, count, room);
+            if (strcmp(name, "posix") && strcmp(name, "right")) // copies of the rest, for other kinds of clock
+                collect_zones(name, names, count, room);
             continue;
         }
         if (*count == *room) {

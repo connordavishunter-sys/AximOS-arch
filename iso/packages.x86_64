@@ -29,6 +29,11 @@ foot
 xterm
 xorg-xwayland
 ttf-dejavu
+# Installing: the disk and boot tools aximos-install uses, and the development tools,
+# which it takes out again unless they're asked for
+aximos-installer
+base-devel
+git
 # AximOS
 aximos-libgui
 aximos-apps

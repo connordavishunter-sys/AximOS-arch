@@ -1,0 +1,240 @@
+#!/bin/bash
+# Installs AximOS from the live system onto a drive, as root. The installer app runs
+# it with sudo, and it can be run by hand:
+#
+#   aximos-install list
+#       The drives it can go on, a line each: the drive, its size, its largest free
+#       space, and the ways it can go there, of free, whole and replace.
+#
+#   aximos-install DRIVE WAY --name NAME [--hostname NAME] [--timezone ZONE] [--dev]
+#       Installs it, WAY being one of those, with the first account's password read
+#       from a line of standard input. free makes AximOS's partitions in the
+#       drive's largest free space, whole erases the drive for them, and replace
+#       formats an AximOS's partitions already on it: its boot partition, a FAT one
+#       labelled AXIMOS, and its root, labelled AximOS. --dev keeps the development
+#       tools, base-devel and git, which are otherwise taken out.
+#
+# The live system's copied, as it is, onto an ext4 root, then what only the live
+# system has is taken out: its account, logging in by itself, the serial port's
+# root shell, the tests' tools and this. Limine boots it, from its own boot
+# partition, with a menu of the other systems it finds, and starts first.
+set -euo pipefail
+
+MIN_BYTES=$((16 * 1024 * 1024 * 1024))
+BOOT_SIZE=512M
+TARGET=/mnt/aximos-install
+LIVE_PACKAGES=(aximos-installer hostapd dnsmasq mkinitcpio-archiso)
+DEV_PACKAGES=(base-devel git)
+
+say() { echo "aximos-install: $*"; }
+die() { say "$*" >&2; exit 1; }
+
+# The disk the live system booted from, which isn't offered: the one its partition's
+# on, or itself, as a USB stick the ISO was written to whole is.
+live_disk() {
+    local source parent
+    source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
+    [[ -n $source ]] || return 0
+    parent=$(lsblk -no PKNAME "$source" 2>/dev/null | head -1)
+    basename "${parent:-$source}"
+}
+
+# The largest free space on a drive, in bytes, which is none on a blank one.
+largest_free() {
+    { parted -sm "$1" unit B print free 2>/dev/null || true; } | awk -F: '$5 == "free;" { sub("B", "", $4); if ($4 > max) max = $4 } END { print max + 0 }'
+}
+
+# An AximOS's partitions on a drive, as "boot root", or nothing.
+old_aximos() {
+    local boot root
+    boot=$(lsblk -lnpo PATH,FSTYPE,LABEL "$1" | awk '$2 == "vfat" && $3 == "AXIMOS" { print $1; exit }')
+    root=$(lsblk -lnpo PATH,LABEL,PARTLABEL "$1" | awk '$1 != "'"$1"'" && ($2 == "AximOS" || $3 == "AximOS") { print $1; exit }')
+    [[ -n $boot && -n $root ]] && echo "$boot $root"
+}
+
+list() {
+    local live name size free ways
+    live=$(live_disk)
+    while read -r name size type; do
+        [[ $type == disk && $name != "/dev/$live" ]] || continue
+        (( size >= MIN_BYTES )) || continue
+        free=$(largest_free "$name")
+        ways=()
+        [[ -n $(old_aximos "$name") ]] && ways+=(replace)
+        (( free >= MIN_BYTES )) && ways+=(free)
+        ways+=(whole)
+        printf '%s\t%s\t%s\t%s\n' "$name" "$(numfmt --to=iec "$size")B" "$(numfmt --to=iec "$free")B" "${ways[*]}"
+    done < <(lsblk -dnbpo NAME,SIZE,TYPE -e 1,7,11,251)
+}
+
+# The partitions on a drive, a path a line.
+partitions() { lsblk -lnpo PATH,TYPE "$1" | awk '$2 == "part" { print $1 }'; }
+
+# Makes a boot partition and a root, in the drive's largest free space, saying them.
+make_partitions() {
+    local drive=$1 before after
+    before=$(partitions "$drive")
+    sgdisk -n "0:0:+$BOOT_SIZE" -t 0:ef00 -c 0:"EFI system" "$drive" >/dev/null
+    sgdisk -n 0:0:0 -t 0:8300 -c 0:AximOS "$drive" >/dev/null
+    partprobe "$drive" 2>/dev/null || true
+    udevadm settle
+    after=$(comm -13 <(echo "$before" | sort) <(partitions "$drive" | sort))
+    # The boot partition's the smaller, which comes first.
+    lsblk -lnbpo PATH,SIZE $after | sort -k2 -n | awk '{ printf "%s ", $1 }'
+}
+
+# What the live system has that the installed one shouldn't.
+live_files=(
+    etc/systemd/system/aximos-live.service etc/systemd/system/sysinit.target.wants/aximos-live.service
+    etc/systemd/system/serial-getty@ttyS0.service.d etc/sudoers.d/live etc/sysusers.d/aximos-live.conf
+    etc/tmpfiles.d/aximos-live.conf etc/systemd/journald.conf.d/volatile-storage.conf
+    etc/mkinitcpio.conf.d/archiso.conf etc/machine-id
+)
+
+# Limine's menu: AximOS, then each other system's EFI loader on the drives' FAT
+# partitions, but for AximOS's own and the live system's.
+boot_menu() {
+    local boot=$1 root_uuid=$2 live part fs uuid look loader name
+    live=$(live_disk)
+    cat <<EOF
+timeout: 5
+
+/AximOS
+    protocol: linux
+    path: boot():/vmlinuz-linux
+    module_path: boot():/initramfs-linux.img
+    cmdline: root=PARTUUID=$root_uuid rw nvidia_drm.modeset=1 console=ttyS0,115200 console=tty1 quiet
+EOF
+    look=$(mktemp -d)
+    while read -r part fs uuid label; do
+        [[ $fs == vfat && $part != "$boot" && $part != /dev/loop* && -n $uuid ]] || continue
+        [[ -n $live && $(lsblk -no PKNAME "$part") == "$live" ]] && continue
+        mount -o ro "$part" "$look" 2>/dev/null || continue
+        for loader in EFI/limine/limine_x64.efi EFI/Microsoft/Boot/bootmgfw.efi EFI/systemd/systemd-bootx64.efi \
+            EFI/refind/refind_x64.efi EFI/*/grubx64.efi EFI/BOOT/BOOTX64.EFI; do
+            [[ -f $look/$loader ]] || continue
+            case $loader in
+                *limine*) name=Limine ;; *Microsoft*) name=Windows ;; *systemd*) name=systemd-boot ;;
+                *refind*) name=rEFInd ;; *grub*) name=GRUB ;; *) name="Another system" ;;
+            esac
+            [[ $label == AXIMOS ]] && name=AximOS
+            printf '\n/%s, on %s\n    protocol: efi\n    path: guid(%s):/%s\n' "$name" "${part#/dev/}" "$uuid" "$loader"
+            break
+        done
+        umount "$look"
+    done < <(lsblk -lnpo PATH,FSTYPE,PARTUUID,LABEL)
+    rmdir "$look"
+}
+
+install() {
+    local drive=$1 way=$2 name="" hostname=aximos timezone=UTC dev=false password boot root parts
+    shift 2
+    while (( $# )); do
+        case $1 in
+            --name) name=$2; shift ;;
+            --hostname) hostname=$2; shift ;;
+            --timezone) timezone=$2; shift ;;
+            --dev) dev=true ;;
+            *) die "what's $1?" ;;
+        esac
+        shift
+    done
+    [[ $EUID == 0 ]] || die "it needs to be run as root"
+    [[ -b $drive && $(lsblk -dno TYPE "$drive") == disk ]] || die "$drive isn't a drive"
+    [[ $(basename "$drive") != "$(live_disk)" ]] || die "$drive is the one the live system's on"
+    [[ $name =~ ^[a-z_][a-z0-9_.-]*$ && ${#name} -le 32 ]] || die "a username is lowercase letters, digits, dots, dashes and underscores"
+    [[ $hostname =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]] || die "a computer's name is letters, digits and dashes"
+    [[ -f /usr/share/zoneinfo/$timezone ]] || die "there's no time zone $timezone"
+    IFS= read -r password || die "it needs the account's password on standard input"
+    [[ -n $password ]] || die "the password's empty"
+
+    say "making its partitions"
+    umount -R "$TARGET" 2>/dev/null || true
+    if [[ $way == whole ]]; then
+        for part in $(partitions "$drive"); do [[ -z $(findmnt -no TARGET "$part") ]] || die "$part is in use"; done
+    fi
+    case $way in
+        replace)
+            parts=$(old_aximos "$drive") || die "there's no AximOS on $drive"
+            read -r boot root <<<"$parts" ;;
+        free)
+            (( $(largest_free "$drive") >= MIN_BYTES )) || die "$drive hasn't 16 GiB free"
+            read -r boot root <<<"$(make_partitions "$drive")" ;;
+        whole)
+            wipefs -aq "$drive"
+            sgdisk -Z "$drive" >/dev/null
+            read -r boot root <<<"$(make_partitions "$drive")" ;;
+        *) die "a way is free, whole or replace" ;;
+    esac
+    [[ -b $boot && -b $root ]] || die "its partitions couldn't be made"
+    for part in "$boot" "$root"; do [[ -z $(findmnt -no TARGET "$part") ]] || die "$part is in use"; done
+    say "formatting $boot and $root"
+    mkfs.vfat -F 32 -n AXIMOS "$boot" >/dev/null
+    mkfs.ext4 -qF -L AximOS "$root"
+    mkdir -p "$TARGET"
+    mount "$root" "$TARGET"
+    mkdir -p "$TARGET/boot"
+    mount "$boot" "$TARGET/boot"
+
+    # The live system, as it is, a line for every percent copied.
+    say "copying the system"
+    set +o pipefail
+    rsync -aAXHx --info=progress2 --no-inc-recursive --exclude='/dev/*' --exclude='/proc/*' --exclude='/sys/*' \
+        --exclude='/run/*' --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/boot/*' --exclude='/var/tmp/*' \
+        --exclude='/var/log/journal/*' --exclude='/home/*' --exclude='/root/*' / "$TARGET/" \
+        | stdbuf -o0 tr '\r' '\n' | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/ && $i != last) { last = $i; print "aximos-install: copied " $i; fflush() } }'
+    copied=${PIPESTATUS[0]}
+    set -o pipefail
+    (( copied == 0 || copied == 24 )) || die "the system couldn't be copied (rsync said $copied)" # 24: a file went while copying
+
+    say "making it its own system"
+    for file in "${live_files[@]}"; do rm -rf "${TARGET:?}/$file"; done
+    cat >"$TARGET/etc/greetd/config.toml" <<'EOF'
+# wm's own log-in screen logs in. What wm says goes to the journal, as wm.
+[terminal]
+vt = 1
+
+[default_session]
+command = "systemd-cat -t wm wm --login"
+user = "greeter"
+EOF
+    arch-chroot "$TARGET" userdel aximos 2>/dev/null || true
+    echo "$hostname" >"$TARGET/etc/hostname"
+    ln -sf "/usr/share/zoneinfo/$timezone" "$TARGET/etc/localtime"
+    genfstab -U "$TARGET" >"$TARGET/etc/fstab"
+    packages=("${LIVE_PACKAGES[@]}")
+    $dev || packages+=("${DEV_PACKAGES[@]}")
+    installed=$(arch-chroot "$TARGET" pacman -Qq "${packages[@]}" 2>/dev/null || true)
+    [[ -z $installed ]] || arch-chroot "$TARGET" pacman -Rns --noconfirm $installed >/dev/null
+
+    say "making the account $name"
+    echo '%wheel ALL=(ALL:ALL) ALL' >"$TARGET/etc/sudoers.d/wheel"
+    chmod 440 "$TARGET/etc/sudoers.d/wheel"
+    arch-chroot "$TARGET" useradd -m -G wheel,video,input,audio -s /bin/bash "$name"
+    printf '%s:%s\n' "$name" "$password" | arch-chroot "$TARGET" chpasswd
+
+    say "making its boot files"
+    cp "$(ls -d "$TARGET"/usr/lib/modules/*/vmlinuz | head -1)" "$TARGET/boot/vmlinuz-linux"
+    arch-chroot "$TARGET" mkinitcpio -p linux >/dev/null 2>&1 || die "its boot files couldn't be made"
+    mkdir -p "$TARGET/boot/EFI/BOOT"
+    cp /usr/share/limine/BOOTX64.EFI "$TARGET/boot/EFI/BOOT/BOOTX64.EFI"
+    boot_menu "$boot" "$(lsblk -no PARTUUID "$root")" >"$TARGET/boot/EFI/BOOT/limine.conf"
+
+    # It starts first, in place of any AximOS before it.
+    if [[ -d /sys/firmware/efi/efivars ]]; then
+        for entry in $(efibootmgr | awk '/^Boot[0-9A-F]{4}\*? AximOS\t/ { print substr($1, 5, 4) }'); do
+            efibootmgr -qb "$entry" -B || true
+        done
+        efibootmgr -q -c -d "$drive" -p "$(cat "/sys/class/block/$(basename "$boot")/partition")" -L AximOS \
+            -l '\EFI\BOOT\BOOTX64.EFI' || say "the firmware wouldn't take a boot entry, so it starts from the drive's own"
+    fi
+    sync
+    umount -R "$TARGET"
+    say "done"
+}
+
+case ${1:-} in
+    list) list ;;
+    /dev/*) install "$@" ;;
+    *) die "usage: aximos-install list | aximos-install DRIVE free|whole|replace --name NAME [--hostname NAME] [--timezone ZONE] [--dev]" ;;
+esac

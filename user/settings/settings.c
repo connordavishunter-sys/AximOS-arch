@@ -266,7 +266,7 @@ static void appearance(struct gui_ui *ui) {
     gui_label(ui, "Wallpaper");
 
     // None first, which leaves the desktop the theme's colour, as wm has it.
-    struct gui_image none = {none_pixels, THUMB_WIDTH, THUMB_HEIGHT};
+    struct gui_image none = {none_pixels, THUMB_WIDTH, THUMB_HEIGHT, 1};
 
     for (int i = 0; i < THUMB_WIDTH * THUMB_HEIGHT; i++)
         none_pixels[i] = settings.light ? 0xFFD5DBE6 : 0xFF1E2430;

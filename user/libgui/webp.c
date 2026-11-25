@@ -22,6 +22,6 @@ bool webp_decode(const uint8_t *data, size_t size, struct gui_image *image) {
     // Blue, green, red and alpha bytes are 0xAARRGGBB, and libwebp's memory is malloc's.
     if (!(pixels = decode(data, size, &width, &height)))
         return image_fail("a broken WebP");
-    *image = (struct gui_image){(uint32_t *)pixels, width, height};
+    *image = (struct gui_image){(uint32_t *)pixels, width, height, 1};
     return true;
 }

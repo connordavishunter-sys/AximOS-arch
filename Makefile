@@ -44,7 +44,7 @@ SERVER_CODE := $(PROTOCOLS)/aximos-shell-v1-server.c
 APP_FOLDERS := Accessories Games System Demos
 APPS_Accessories := calculator editor paint viewer player
 APPS_Games := snake
-APPS_System := settings tasks
+APPS_System := settings tasks installer
 APPS_Demos := guidemo widgets
 APPS := term files $(foreach f,$(APP_FOLDERS),$(APPS_$(f)))
 app_dir = $(strip $(foreach f,$(APP_FOLDERS),$(if $(filter $(1),$(APPS_$(f))),$(f)/)))
@@ -127,6 +127,7 @@ install: all
 	# Text is DejaVu Sans, and terminals' bold DejaVu Sans Mono's, from ttf-dejavu.
 	ln -sf /usr/share/fonts/TTF/DejaVuSans.ttf /usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf $(DESTDIR)$(PREFIX)/share/aximos/fonts/
 	install -Dm644 -t $(DESTDIR)$(PREFIX)/include/aximos user/libgui/include/gui.h abi/key_event.h abi/mouse_event.h
+	install -Dm755 system/aximos-install $(DESTDIR)$(PREFIX)/bin/aximos-install
 	install -Dm644 system/aximos.desktop $(DESTDIR)$(PREFIX)/share/wayland-sessions/aximos.desktop
 	install -Dm644 system/logind.conf $(DESTDIR)$(PREFIX)/lib/systemd/logind.conf.d/aximos.conf
 	install -Dm644 system/pam.d/aximos-lock $(DESTDIR)/etc/pam.d/aximos-lock

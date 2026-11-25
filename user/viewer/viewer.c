@@ -227,7 +227,7 @@ static void key(const struct key_event *k) {
         draw();
     }
     else if ((k->modifiers & KEY_MOD_CTRL) && (k->text == 'c' || k->text == ('c' & 0x1F)) && image.pixels) {
-        struct gui_canvas all = {image.pixels, image.width, image.height, image.width};
+        struct gui_canvas all = {image.pixels, image.width, image.height, image.width, 1};
 
         if (gui_clipboard_set_image(&all))
             printf("viewer: copied %dx%d\n", image.width, image.height);
@@ -347,7 +347,7 @@ static void step(int by, bool to_end) {
 
 // Turns the picture a quarter right, or left.
 static void turn(bool right) {
-    struct gui_image turned = {malloc((size_t)image.width * image.height * sizeof(uint32_t)), image.height, image.width};
+    struct gui_image turned = {malloc((size_t)image.width * image.height * sizeof(uint32_t)), image.height, image.width, 1};
 
     if (!image.pixels || !turned.pixels) {
         free(turned.pixels);

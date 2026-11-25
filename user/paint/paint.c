@@ -101,7 +101,7 @@ static bool new_picture(int width, int height) {
     if (!pixels)
         return false;
     free(picture.pixels);
-    picture = (struct gui_canvas){pixels, width, height, width};
+    picture = (struct gui_canvas){pixels, width, height, width, 1};
     gui_fill(&picture, 0, 0, width, height, WHITE);
     forget(undo, &undo_count);
     forget(redo, &redo_count);
@@ -143,7 +143,7 @@ static void keep(struct gui_canvas *list, int *count) {
         memmove(list, list + 1, (UNDO - 1) * sizeof(*list));
         --*count;
     }
-    list[(*count)++] = (struct gui_canvas){copy, picture.width, picture.height, picture.width};
+    list[(*count)++] = (struct gui_canvas){copy, picture.width, picture.height, picture.width, 1};
 }
 
 // Before a change: what it was, to go back to, and nothing to redo.
@@ -189,7 +189,7 @@ static void lift(void) {
     if (!pixels)
         return;
     save_undo();
-    floating = (struct gui_canvas){pixels, r.width, r.height, r.width};
+    floating = (struct gui_canvas){pixels, r.width, r.height, r.width, 1};
     gui_copy(&floating, 0, 0, &picture, r.x, r.y, r.width, r.height);
     gui_fill(&picture, r.x, r.y, r.width, r.height, WHITE);
     set_modified(true);
@@ -207,7 +207,7 @@ static void copy_picture(void) {
     struct gui_rect r = selection;
     struct gui_canvas part = floating.pixels ? floating
                            : r.width       ? (struct gui_canvas){picture.pixels + (long)r.y * picture.stride + r.x, r.width,
-                                                           r.height, picture.stride}
+                                                           r.height, picture.stride, 1}
                                            : picture;
 
     if (gui_clipboard_set_image(&part))
@@ -250,7 +250,7 @@ static void paste_picture(void) {
     uint32_t *lifted = malloc((size_t)pasted.width * pasted.height * sizeof(uint32_t));
 
     if (pixels && lifted) {
-        struct gui_canvas bigger = {pixels, width, height, width};
+        struct gui_canvas bigger = {pixels, width, height, width, 1};
         bool grew = width > picture.width || height > picture.height;
         int x = grew ? 0 : (int)(scroll_x / zooms[zoom_index]), y = grew ? 0 : (int)(scroll_y / zooms[zoom_index]);
 
@@ -259,7 +259,7 @@ static void paste_picture(void) {
         gui_copy(&bigger, 0, 0, &picture, 0, 0, picture.width, picture.height);
         free(picture.pixels);
         picture = bigger;
-        floating = (struct gui_canvas){lifted, pasted.width, pasted.height, pasted.width};
+        floating = (struct gui_canvas){lifted, pasted.width, pasted.height, pasted.width, 1};
         gui_fill(&floating, 0, 0, pasted.width, pasted.height, WHITE);
         gui_draw_image(&floating, 0, 0, &pasted);
         x = x + pasted.width > width ? width - pasted.width : x;
@@ -692,7 +692,7 @@ static void show_picture(struct gui_ui *ui, struct gui_rect area) {
 
         if (preview.width != picture.width || preview.height != picture.height) {
             free(preview.pixels);
-            preview = (struct gui_canvas){malloc(bytes), picture.width, picture.height, picture.width};
+            preview = (struct gui_canvas){malloc(bytes), picture.width, picture.height, picture.width, 1};
         }
         over = preview.pixels;
     }

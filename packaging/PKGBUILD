@@ -3,7 +3,7 @@
 # chroot from a tarball of the tree, aximos.tar.gz, beside this.
 
 pkgbase=aximos
-pkgname=(aximos-libgui aximos-apps aximos-desktop)
+pkgname=(aximos-libgui aximos-apps aximos-desktop aximos-installer)
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='AximOS desktop'
@@ -45,6 +45,7 @@ package_aximos-apps() {
     depends=(aximos-libgui)
     _install_all
     _take usr/lib/aximos/apps usr/bin/run usr/bin/notify usr/share/aximos/example_music
+    rm "$pkgdir/usr/lib/aximos/apps/System/installer" # aximos-installer's
 }
 
 package_aximos-desktop() {
@@ -55,4 +56,11 @@ package_aximos-desktop() {
     _install_all
     _take usr/bin/wm usr/lib/aximos/login usr/share/aximos/wallpapers usr/share/wayland-sessions \
         usr/lib/systemd/logind.conf.d etc/pam.d/aximos-lock
+}
+
+package_aximos-installer() {
+    pkgdesc='AximOS installer: puts AximOS from its live ISO onto a drive, beside other systems or in their place'
+    depends=(aximos-libgui sudo arch-install-scripts rsync gptfdisk parted dosfstools e2fsprogs limine efibootmgr)
+    _install_all
+    _take usr/lib/aximos/apps/System/installer usr/bin/aximos-install
 }

@@ -30,14 +30,19 @@ def key_for(c):
 
 
 class VM:
-    def __init__(self, timeout=600, memory='4G', smp=4, iso=BUILD + '/aximos.iso'):
-        """Boots the ISO, with a virtio GPU the size of the old tests' screen."""
+    def __init__(self, timeout=600, memory='4G', smp=4, iso=BUILD + '/aximos.iso', disks=()):
+        """Boots the ISO, with a virtio GPU the size of the old tests' screen, and
+        disks, qcow2 images, as virtio drives. Without the ISO, it boots from them."""
         self.dir = tempfile.mkdtemp(dir=WORK)
         self.log = self.dir + '/serial.log'
         serial, monitor, qmp = self.dir + '/serial.sock', self.dir + '/monitor.sock', self.dir + '/qmp.sock'
         self.proc = subprocess.Popen(
             ['timeout', str(timeout), 'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', str(smp),
-             '-m', memory, '-M', 'q35', '-display', 'none', '-bios', OVMF, '-cdrom', iso,
+             '-m', memory, '-M', 'q35', '-display', 'none', '-bios', OVMF,
+             # The ISO boots first, when it's there, then the drives in order.
+             *(['-drive', f'file={iso},media=cdrom,if=none,id=cd', '-device', 'ide-cd,drive=cd,bootindex=0'] if iso else []),
+             *[a for n, d in enumerate(disks) for a in ('-drive', f'file={d},if=none,id=disk{n},format=qcow2',
+                                                        '-device', f'virtio-blk-pci,drive=disk{n},bootindex={n + 1}')],
              '-device', f'virtio-vga,xres={WIDTH},yres={HEIGHT}', '-netdev', 'user,id=net0',
              '-device', 'virtio-net,netdev=net0', '-device', 'qemu-xhci', '-device', 'usb-tablet', '-device', 'usb-kbd',
              '-audiodev', 'none,id=snd0', '-device', 'ich9-intel-hda', '-device', 'hda-output,audiodev=snd0',
@@ -94,6 +99,23 @@ class VM:
     def boot(self, secs=180):
         """Waits for the root shell the serial port logs into."""
         assert self.wait(PROMPT, secs), self.text()[-2000:]
+        self.run('stty -echo cols 200; export PS1="# "; export SYSTEMD_PAGER= SYSTEMD_COLORS=0', 1)
+
+    def log_in(self, user, password, secs=180):
+        """Logs in on the serial port, as an installed system has no root shell there,
+        then becomes root with sudo, whose prompt is waited for like the live one's."""
+        assert self.wait('login:', secs), self.text()[-2000:]
+        at = self.mark()
+        self.type(user + '\n')
+        assert self.wait('Password:', 20, at), self.text(at)
+        at = self.mark()
+        self.type(password + '\n')
+        assert self.wait(f'{user}@', 30, at), self.text(at)
+        at = self.mark()
+        self.type('sudo -i\n')
+        assert self.wait('password for', 20, at), self.text(at)
+        self.type(password + '\n')
+        assert self.wait('root@', 20, at), self.text(at)
         self.run('stty -echo cols 200; export PS1="# "; export SYSTEMD_PAGER= SYSTEMD_COLORS=0', 1)
 
     def run(self, line, secs=10.0):

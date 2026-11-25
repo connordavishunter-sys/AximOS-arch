@@ -5,39 +5,47 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-// Installs AximOS from the live system, through aximos-install, which it runs
-// as root with sudo: it asks which drive, and how, then for the first account, and
-// shows how far it's got.
+// Installs AximOS from the live system, through aximos-install, which it runs as
+// root with sudo: it asks which drive, and how, then for the first account, the
+// computer's name and the time zone, and shows how far it's got.
 
 #define MAX_DRIVES 16
 
-enum page { CHOOSE, ACCOUNT, CONFIRM, INSTALLING, DONE, FAILED };
-enum way { FREE, WHOLE, AGAIN, AGAIN_ERASE, WAYS };
+enum page { CHOOSE, ACCOUNT, ZONE, CONFIRM, INSTALLING, DONE, FAILED };
+enum way { REPLACE, FREE, WHOLE, WAYS }; // the kindest to what's on the drive first
 
 struct drive {
     char name[32], size[24], free[24];
     bool can[WAYS];
 };
 
-static const char *const page_names[] = {"choose", "account", "confirm", "installing", "done", "failed"};
-static const char *const how[] = {"free", "whole", "again", "again"};
+static const char *const page_names[] = {"choose", "account", "zone", "confirm", "installing", "done", "failed"};
+static const char *const way_names[] = {"replace", "free", "whole"};
+static const char *const way_text[] = {"Replace the AximOS on it", "In its free space, beside what's there",
+                                       "Over the whole drive, erasing it"};
 static struct drive drives[MAX_DRIVES];
-static char labels[MAX_DRIVES][96], way_labels[WAYS][96], output[8192];
+static char labels[MAX_DRIVES][96], output[8192];
 static const char *drive_items[MAX_DRIVES], *way_items[WAYS];
 static enum way ways[WAYS];
 static int drive_count, way_count, chosen, way;
 static enum page page;
-static char name[64], password[128], again[128], own[128], message[160];
+static char name[33], password[128], again[128], hostname[64] = "aximos", message[160];
+static bool dev_tools;
 static int percent;
-static pid_t child;
-static int to_child = -1, from_child = -1;
-static bool gave_password, gave_again, dev_tools = true;
+static pid_t child = -1;
+static int from_child = -1;
+
+static char **zones;
+static const char **shown; // the zones the search matches
+static int zone_count, shown_count, zone_at;
+static char search[64], zone[GUI_PATH_MAX] = "UTC";
 
 static void find_drives(void) {
-    FILE *f = popen("aximos-install list", "r");
+    FILE *f = popen("sudo -n aximos-install list", "r");
     char line[256];
 
     while (f && drive_count < MAX_DRIVES && fgets(line, sizeof(line), f)) {
@@ -49,11 +57,10 @@ static void find_drives(void) {
         snprintf(d->name, sizeof(d->name), "%s", drive);
         snprintf(d->size, sizeof(d->size), "%s", size);
         snprintf(d->free, sizeof(d->free), "%s", free);
-        d->can[FREE] = strstr(can, "free");
-        d->can[WHOLE] = strstr(can, "whole");
-        d->can[AGAIN] = d->can[AGAIN_ERASE] = strstr(can, "again");
-        snprintf(labels[drive_count], sizeof(labels[0]), "%s, %s%s%s%s", d->name, d->size,
-                 d->can[FREE] ? ", " : "", d->can[FREE] ? d->free : "", d->can[FREE] ? " free" : "");
+        for (int w = 0; w < WAYS; w++)
+            d->can[w] = strstr(can, way_names[w]);
+        snprintf(labels[drive_count], sizeof(labels[0]), "%s, %s%s%s", d->name, d->size,
+                 d->can[REPLACE] ? ", with AximOS on it" : "", d->can[FREE] && !d->can[REPLACE] ? ", with room free" : "");
         drive_items[drive_count] = labels[drive_count];
         drive_count++;
     }
@@ -61,37 +68,48 @@ static void find_drives(void) {
         pclose(f);
 }
 
-// The ways the chosen drive allows, the kindest to what's on it first.
 static void find_ways(void) {
-    struct drive *d = &drives[chosen];
-    static const enum way order[] = {AGAIN, FREE, AGAIN_ERASE, WHOLE};
-
     way_count = 0;
-    for (int i = 0; i < WAYS; i++) {
-        enum way w = order[i];
-
-        if (!d->can[w])
-            continue;
-        snprintf(way_labels[way_count], sizeof(way_labels[0]), "%s",
-                 w == FREE    ? "In its free space, beside what's there"
-                 : w == WHOLE ? "Over the whole drive, erasing it"
-                 : w == AGAIN ? "Again, keeping its accounts and /home"
-                              : "Again, erasing its accounts and /home");
-        ways[way_count] = w;
-        way_items[way_count] = way_labels[way_count];
-        way_count++;
+    for (int w = 0; drive_count && w < WAYS; w++) {
+        if (drives[chosen].can[w]) {
+            ways[way_count] = w;
+            way_items[way_count++] = way_text[w];
+        }
     }
     way = 0;
 }
 
-static bool fresh(void) {
-    return ways[way] != AGAIN;
+static bool contains(const char *text, const char *part) {
+    size_t n = strlen(part);
+
+    for (; *text; text++) {
+        if (!strncasecmp(text, part, n))
+            return true;
+    }
+    return !n;
+}
+
+// The zones the search matches, keeping the chosen one chosen if it still is, or
+// else choosing the first.
+static void filter(void) {
+    shown_count = zone_at = 0;
+    for (int i = 0; i < zone_count; i++) {
+        if (contains(zones[i], search)) {
+            if (!strcmp(zones[i], zone))
+                zone_at = shown_count;
+            shown[shown_count++] = zones[i];
+        }
+    }
+    if (shown_count && strcmp(shown[zone_at], zone))
+        snprintf(zone, sizeof(zone), "%s", shown[zone_at]);
 }
 
 static void go_to(struct gui_ui *ui, enum page to) {
+    static const char *const focus[] = {"##drive", "##name", "##search", "Install", "##none", "Restart", "Back"};
+
     page = to;
     message[0] = '\0';
-    gui_set_focus(ui, page == CHOOSE ? "##drive" : page == ACCOUNT ? "##name" : page == CONFIRM ? "##own" : "##none", NULL);
+    gui_set_focus(ui, focus[page], NULL);
     ui->again = true;
     printf("installer: %s\n", page_names[page]);
     fflush(stdout);
@@ -103,8 +121,7 @@ static void fail(struct gui_ui *ui, const char *what) {
     printf("installer: failed: %s\n", what);
 }
 
-// install, through sudo, which is given the password first, then install the new
-// account's when it asks.
+// aximos-install, as root, given the account's password on its standard input.
 static void start(struct gui_ui *ui) {
     int in[2], out[2];
 
@@ -116,28 +133,21 @@ static void start(struct gui_ui *ui) {
         dup2(out[1], 2);
         close(in[1]);
         close(out[0]);
-        char *argv[10] = {"sudo", "aximos-install", drives[chosen].name, (char *)how[ways[way]], "-y"};
-        int n = 5;
-
-        if (fresh())
-            argv[n++] = name;
-        if (ways[way] == AGAIN_ERASE)
-            argv[n++] = "--erase";
-        if (!dev_tools)
-            argv[n++] = "--no-dev";
+        char *argv[] = {"sudo", "-n", "aximos-install", drives[chosen].name, (char *)way_names[ways[way]], "--name", name,
+                        "--hostname", hostname, "--timezone", zone, dev_tools ? "--dev" : NULL, NULL};
         execvp("sudo", argv);
         _exit(127);
     }
     close(in[0]);
     close(out[1]);
-    to_child = in[1];
+    dprintf(in[1], "%s\n", password);
+    close(in[1]);
+    memset(password, 0, sizeof(password));
+    memset(again, 0, sizeof(again));
     from_child = out[0];
     fcntl(from_child, F_SETFL, O_NONBLOCK);
-    dprintf(to_child, "%s\n", own);
-    memset(own, 0, sizeof(own));
     output[0] = '\0';
     percent = 0;
-    gave_password = gave_again = false;
     go_to(ui, INSTALLING);
 }
 
@@ -152,14 +162,14 @@ static int last_lines(char lines[][96], int count) {
 
         while (start > output && start[-1] != '\n')
             start--;
-        if (end - start > 1 && strncmp(start, "aximos-install: copied ", 23) && strncmp(start, "Password for", 12))
+        if (end - start > 1 && strncmp(start, "aximos-install: copied ", 23))
             snprintf(lines[n++], 96, "%.*s", (int)(end - start - (end[-1] == '\n')), start);
         end = start;
     }
     return n;
 }
 
-// What install has said since, answering what it asks, until it's finished.
+// What install has said since, until it's finished.
 static void follow(struct gui_ui *ui) {
     size_t have = strlen(output);
     ssize_t n;
@@ -177,27 +187,15 @@ static void follow(struct gui_ui *ui) {
     fflush(stdout);
     for (char *p = output; (p = strstr(p, "aximos-install: copied ")); p++)
         percent = atoi(p + 23);
-    if (!gave_password && strstr(output, "New password: ")) {
-        dprintf(to_child, "%s\n", password);
-        gave_password = true;
-    }
-    if (!gave_again && strstr(output, "Again: ")) {
-        dprintf(to_child, "%s\n", password);
-        gave_again = true;
-    }
     if (n == 0 || (n < 0 && errno != EAGAIN)) {
         waitpid(child, &status, 0);
-        close(to_child);
         close(from_child);
-        to_child = from_child = -1;
-        memset(password, 0, sizeof(password));
-        memset(again, 0, sizeof(again));
+        from_child = -1;
         if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && strstr(output, "aximos-install: done"))
             go_to(ui, DONE);
         else
-            fail(ui, strstr(output, "sudo: wrong password") ? "That password isn't right."
-                     : strstr(output, "sudo: only") ? "Your account isn't in the admin group, so it can't install."
-                                                    : "It couldn't be installed. This is what install said last:");
+            fail(ui, strstr(output, "sudo:") ? "It needs to run as root, which this account can't without a password."
+                                              : "It couldn't be installed. This is what install said last:");
     }
 }
 
@@ -206,7 +204,7 @@ static void choose(struct gui_ui *ui) {
 
     gui_heading(ui, "Install AximOS");
     if (!drive_count) {
-        gui_label(ui, "There's no drive it can go on. It needs 4 GiB, or that much free.");
+        gui_label(ui, "There's no drive it can go on. It needs one of 16 GiB, or that much free.");
         return;
     }
     gui_label(ui, "Drive");
@@ -214,9 +212,19 @@ static void choose(struct gui_ui *ui) {
         find_ways();
     gui_label(ui, "How");
     gui_dropdown(ui, "##how", way_items, way_count, &way);
-    gui_checkbox(ui, "Development tools, to build programs", &dev_tools);
+    gui_checkbox(ui, "Development tools, to build programs (base-devel and git)", &dev_tools);
     if (gui_button(ui, "Next") || next)
-        go_to(ui, fresh() ? ACCOUNT : CONFIRM);
+        go_to(ui, ACCOUNT);
+}
+
+static bool hostname_ok(const char *s) {
+    if (!*s || *s == '-' || strlen(s) > 63)
+        return false;
+    for (; *s; s++) {
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') || *s == '-'))
+            return false;
+    }
+    return true;
 }
 
 static void account(struct gui_ui *ui) {
@@ -230,6 +238,8 @@ static void account(struct gui_ui *ui) {
     gui_password(ui, "##password", password, sizeof(password));
     gui_label(ui, "Password again");
     gui_password(ui, "##again", again, sizeof(again));
+    gui_label(ui, "The computer's name");
+    gui_textbox(ui, "##hostname", hostname, sizeof(hostname));
     if (message[0])
         gui_label(ui, "%s", message);
     if (gui_button(ui, "Back"))
@@ -238,36 +248,56 @@ static void account(struct gui_ui *ui) {
     if (!gui_button(ui, "Next") && !next)
         return;
 
-    const char *problem = !account_name_ok(name) ? "A username is letters, digits, dots, dashes and underscores."
-                        : !password[0]           ? "Choose a password."
-                        : strcmp(password, again)  ? "The passwords aren't the same."
-                                                   : NULL;
+    const char *problem = !account_name_ok(name) || name[0] < 'a' || name[0] > 'z'
+                            ? "A username starts with a lowercase letter, then letters, digits, dots, dashes and underscores."
+                        : !password[0]            ? "Choose a password."
+                        : strcmp(password, again) ? "The passwords aren't the same."
+                        : !hostname_ok(hostname)  ? "A computer's name is letters, digits and dashes."
+                                                  : NULL;
 
     if (problem) {
         snprintf(message, sizeof(message), "%s", problem);
         printf("installer: %s\n", problem);
-        password[0] = again[0] = '\0';
-        gui_set_focus(ui, account_name_ok(name) ? "##password" : "##name", name);
+        if (strcmp(password, again))
+            password[0] = again[0] = '\0';
         return;
     }
-    go_to(ui, CONFIRM);
+    go_to(ui, ZONE);
+}
+
+static void time_zone(struct gui_ui *ui) {
+    bool enter = gui_key(ui, KEY_ENTER);
+
+    gui_heading(ui, "Time zone");
+    gui_label(ui, "%s, or search for another", zone);
+    if (gui_textbox(ui, "##search", search, sizeof(search)))
+        filter();
+    if (gui_button(ui, "Back"))
+        return go_to(ui, ACCOUNT);
+    gui_same_line(ui);
+    bool next = gui_button(ui, "Next");
+    int picked = gui_list(ui, "##zones", shown, shown_count, &zone_at, 0);
+
+    if (picked && shown_count)
+        snprintf(zone, sizeof(zone), "%s", shown[zone_at]);
+    if (next || enter || picked == GUI_LIST_ACTIVATED)
+        go_to(ui, CONFIRM);
 }
 
 static void confirm(struct gui_ui *ui) {
     struct drive *d = &drives[chosen];
+    enum way w = ways[way];
     bool go = gui_key(ui, KEY_ENTER);
 
-    gui_heading(ui, ways[way] == WHOLE || ways[way] == AGAIN_ERASE ? "Erase and install?" : "Install?");
-    gui_label(ui, ways[way] == FREE    ? "AximOS goes in the %s free on %s, and what's there stays."
-                  : ways[way] == WHOLE ? "Everything on %.0s%s is erased, and AximOS installed in its place."
-                  : ways[way] == AGAIN ? "AximOS on %.0s%s is replaced, keeping its accounts and /home."
-                                       : "AximOS on %.0s%s is erased, with its files, and installed again.",
+    gui_heading(ui, w == FREE ? "Install?" : "Erase and install?");
+    gui_label(ui, w == FREE    ? "AximOS goes in the %s free on %s, and what's there stays."
+                  : w == WHOLE ? "Everything on %.0s%s is erased, and AximOS installed in its place."
+                               : "The AximOS on %.0s%s is erased, with its files, and installed again.",
               d->free, d->name);
+    gui_label(ui, "%s, for %s, in %s%s.", hostname, name, zone, dev_tools ? ", with development tools" : "");
     gui_label(ui, "It starts first when the computer does, with a menu of the others.");
-    gui_label(ui, "Your password, to install as root");
-    gui_password(ui, "##own", own, sizeof(own));
     if (gui_button(ui, "Back"))
-        return go_to(ui, fresh() ? ACCOUNT : CHOOSE);
+        return go_to(ui, ZONE);
     gui_same_line(ui);
     if (gui_button(ui, "Install") || go)
         start(ui);
@@ -289,6 +319,9 @@ static void frame(struct gui_ui *ui) {
     case ACCOUNT:
         account(ui);
         break;
+    case ZONE:
+        time_zone(ui);
+        break;
     case CONFIRM:
         confirm(ui);
         break;
@@ -306,7 +339,7 @@ static void frame(struct gui_ui *ui) {
         gui_heading(ui, "AximOS is installed");
         gui_label(ui, "Take out the USB stick, then restart.");
         if (gui_button(ui, "Restart"))
-            execlp("reboot", "reboot", NULL);
+            execlp("systemctl", "systemctl", "reboot", NULL);
         break;
     case FAILED: {
         char last[4][96];
@@ -326,13 +359,13 @@ static void frame(struct gui_ui *ui) {
 
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: installer\n"
-                            "Installs AximOS from the live system onto a drive, as install does, in a window.\n");
+                            "Installs AximOS from the live system onto a drive, as aximos-install does, in a window.\n");
     if (!gui_connect()) {
         dprintf(STDERR_FILENO, "installer: needs the desktop\n");
         return 1;
     }
 
-    struct gui_window *window = gui_create_window("Install AximOS", 600, 340);
+    struct gui_window *window = gui_create_window("Install AximOS", 640, 420);
     struct gui_ui ui;
 
     if (!window) {
@@ -341,6 +374,11 @@ int main(int argc, char **argv) {
     }
     find_drives();
     find_ways();
+    zone_count = gui_time_zones(&zones);
+    shown = calloc(zone_count + 1, sizeof(*shown));
+    if (shown)
+        filter();
+    printf("installer: %d drives\n", drive_count);
     gui_ui_init(&ui, window);
     go_to(&ui, CHOOSE);
 
@@ -355,8 +393,7 @@ int main(int argc, char **argv) {
         redraw = page == INSTALLING;
         if (redraw)
             follow(&ui);
-        if ((got = gui_wait_event(&e, redraw ? 100 : -1)) < 0
-            || (got && e.type == GUI_CLOSE && page != INSTALLING))
+        if ((got = gui_wait_event(&e, redraw ? 100 : -1)) < 0 || (got && e.type == GUI_CLOSE && page != INSTALLING))
             break;
         if (got)
             redraw |= gui_ui_event(&ui, &e);
