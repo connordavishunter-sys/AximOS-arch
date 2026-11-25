@@ -62,12 +62,30 @@ struct gui_message {
     char buffer[GUI_TITLE_MAX];
 };
 
-// Something to draw on: the screen's copy, or a window.
+// Something to draw on: the screen's copy, or a window. Its width and height, and
+// everything drawn on it, are in the desktop's pixels, each scale of its own pixels
+// wide and high, so a canvas at 2x has four times as many, and draws as sharply.
+#define GUI_MAX_SCALE 2
 struct gui_canvas {
     uint32_t *pixels;
     int width, height;
-    int stride; // pixels from one row to the next
+    int stride; // its own pixels from one row of them to the next
+    int scale;  // 0 is 1
 };
+
+static inline int gui_scale_of(const struct gui_canvas *c) {
+    return c->scale > 1 ? c->scale : 1;
+}
+
+// The pixel at x, y in the desktop's pixels, the top left of its scale square.
+static inline uint32_t *gui_pixel(const struct gui_canvas *c, int x, int y) {
+    return c->pixels + (long)y * gui_scale_of(c) * c->stride + (long)x * gui_scale_of(c);
+}
+
+// Part of a canvas, as a canvas of its own, sharing its pixels.
+static inline struct gui_canvas gui_part(const struct gui_canvas *c, int x, int y, int width, int height) {
+    return (struct gui_canvas){gui_pixel(c, x, y), width, height, c->stride, c->scale};
+}
 
 // Programs draw on canvas, which is private, and updates copy what changed to the
 // pixels the compositor shows, so it never shows a half-drawn frame.
@@ -168,6 +186,7 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
 // them, either of which can be GUI_NONE, which no pixel is.
 #define GUI_NONE 0xFFFFFFFF
 #define GUI_MAX_RADIUS 16
+#define GUI_KEPT (GUI_MAX_RADIUS * GUI_MAX_SCALE) // a corner's pixels, at any scale
 #define GUI_CORNERS 8 // windows' corner radius unless the settings say otherwise
 void gui_fill_rounded(struct gui_canvas *canvas, int x, int y, int width, int height, int radius, uint32_t color);
 void gui_frame_rounded(struct gui_canvas *canvas, int x, int y, int width, int height, int radius, uint32_t fill,
@@ -176,12 +195,12 @@ void gui_frame_rounded(struct gui_canvas *canvas, int x, int y, int width, int h
 // Rounding what's drawn some other way: the pixels in its corners kept before it's
 // drawn, then put back outside its rounded edge, with a line along it, or GUI_NONE.
 void gui_keep_corners(const struct gui_canvas *canvas, int x, int y, int width, int height, int radius,
-                      uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS]);
+                      uint32_t kept[4][GUI_KEPT][GUI_KEPT]);
 void gui_round_corners(struct gui_canvas *canvas, int x, int y, int width, int height, int radius,
-                       uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS], uint32_t line);
+                       uint32_t kept[4][GUI_KEPT][GUI_KEPT], uint32_t line);
 
 // How much of a pixel, out of 256, is inside a corner rounded to radius, x and y
-// in from the corner.
+// in from the corner, all in the canvas's own pixels.
 int gui_corner_coverage(int x, int y, int radius);
 
 // Text 16 pixels high, scaled up by scale, in DejaVu Sans, each character as wide
@@ -323,7 +342,8 @@ bool gui_time_zone_set(const char *name);
 // WebP files. Each returns false if it couldn't, with gui_image_error saying why.
 struct gui_image {
     uint32_t *pixels;
-    int width, height;
+    int width, height; // its own pixels
+    int scale;         // of them to each of the desktop's, 0 being 1, as a 32x32 icon for 2x is 2
 };
 
 bool gui_image_load(const char *path, struct gui_image *image);
@@ -334,15 +354,20 @@ void gui_image_free(struct gui_image *image);
 // A smoothly scaled copy, to be freed as well.
 bool gui_image_scale(const struct gui_image *from, int width, int height, struct gui_image *to);
 
-// Draws an image, blending what's partly transparent with what's under it.
+// Draws an image, blending what's partly transparent with what's under it, width
+// over its scale of the desktop's pixels wide, and as sharp as the canvas is.
 void gui_draw_image(struct gui_canvas *canvas, int x, int y, const struct gui_image *image);
 // Saves pixels as a PNG file, returning false, with gui_image_error saying why, if it couldn't.
 bool gui_image_save(const char *path, const struct gui_canvas *from);
 
-// Icons, 16 pixels square, from GUI_SHARE/icons/name.png, loaded once and
-// kept. NULL if there's no such icon.
+// Icons, 16 of the desktop's pixels square, from GUI_SHARE/icons/name.png, or
+// name@2x.png, 32 square, at 2x, loaded once and kept. NULL if there's no such icon.
 #define GUI_ICON_SIZE 16
 const struct gui_image *gui_icon(const char *name);
+
+// The scale icons are loaded for, which the connection sets from the screen's, and wm
+// from its own.
+void gui_use_scale(int scale);
 
 // The icon for a file by what its name ends in, or for a folder.
 const struct gui_image *gui_file_icon(const char *name, bool folder);
@@ -432,7 +457,7 @@ struct gui_ui {
     bool popup_is_menu, popup_drawn, in_popup, mouse_in_popup;
     struct gui_rect popup_rect, outside_popup;
     uint32_t *popup_pixels;
-    uint32_t popup_corners[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS]; // what was under its rounded corners
+    uint32_t popup_corners[4][GUI_KEPT][GUI_KEPT]; // what was under its rounded corners
     int item_y, item_width, item_index, bar_x;
 
     // The menus in the bar, as of the last frame and so far in this one. An open

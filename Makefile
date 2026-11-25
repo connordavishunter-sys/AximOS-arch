@@ -124,6 +124,8 @@ install: all
 	$(foreach a,$(APPS),install -Dm755 $(BUILD)/apps/$(a) $(DESTDIR)$(PREFIX)/lib/aximos/apps/$(call app_dir,$(a))$(a) &&) true
 	install -d $(DESTDIR)$(PREFIX)/share/aximos
 	cp -r share/. $(DESTDIR)$(PREFIX)/share/aximos/
+	# Text is DejaVu Sans, and terminals' bold DejaVu Sans Mono's, from ttf-dejavu.
+	ln -sf /usr/share/fonts/TTF/DejaVuSans.ttf /usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf $(DESTDIR)$(PREFIX)/share/aximos/fonts/
 	install -Dm644 -t $(DESTDIR)$(PREFIX)/include/aximos user/libgui/include/gui.h abi/key_event.h abi/mouse_event.h
 	install -Dm644 system/aximos.desktop $(DESTDIR)$(PREFIX)/share/wayland-sessions/aximos.desktop
 	install -Dm644 system/logind.conf $(DESTDIR)$(PREFIX)/lib/systemd/logind.conf.d/aximos.conf

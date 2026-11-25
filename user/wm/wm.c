@@ -183,12 +183,17 @@ struct window {
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
 enum { EDGE_LEFT = 1, EDGE_RIGHT = 2, EDGE_TOP = 4, EDGE_BOTTOM = 8 };
 
-// Composed here, in the desktop's pixels, then copied to the display's, each
-// pixel scale times as wide and high there.
+// Composed here, at the display's own resolution: everything's laid out in the
+// desktop's pixels, each scale of the display's wide and high, and drawn as sharply
+// as the display is. Every canvas wm draws on is at this scale, apps' windows too.
 static struct gui_canvas screen;
 static const struct display *display;
 static struct screen output;
 static int scale = 1;
+
+static struct rect scaled(struct rect r) {
+    return (struct rect){r.x * scale, r.y * scale, r.width * scale, r.height * scale};
+}
 
 static struct window *windows[MAX_WINDOWS]; // bottom first
 static int window_count;
@@ -196,9 +201,9 @@ static uint32_t next_id = 1;
 static struct window *focused;
 
 static uint8_t falloff[SHADOW + 1][SHADOW + 1];
-// Out of 256, how much of each pixel in a corner, from the corner, is inside a
-// window's rounded edge.
-static uint16_t coverage[GUI_MAX_RADIUS][GUI_MAX_RADIUS];
+// Out of 256, how much of each of the display's pixels in a corner, from the corner,
+// is inside a window's rounded edge.
+static uint16_t coverage[GUI_KEPT][GUI_KEPT];
 static struct gui_settings settings;
 
 // Whether a window shows what's under it, which the settings can turn off.
@@ -541,29 +546,31 @@ static void make_falloff(void) {
     }
 }
 
-// Darkens what's under a window's shadow, outside its frame, by blending black over it.
+// Darkens what's under a window's shadow, outside its frame, by blending black over
+// it, in the display's pixels.
 static void draw_shadow(struct gui_canvas *c, const struct window *w, int ox, int oy) {
-    struct rect f = frame_of(w), e = extent_of(w), s = {f.x, f.y + SHADOW_DROP, f.width, f.height};
-    struct rect area = {ox, oy, c->width, c->height};
+    struct rect f = scaled(frame_of(w)), e = scaled(extent_of(w)), s = {f.x, f.y + SHADOW_DROP * scale, f.width, f.height};
+    struct rect area = scaled((struct rect){ox, oy, c->width, c->height});
     int x0 = e.x > area.x ? e.x : area.x, x1 = e.x + e.width < area.x + area.width ? e.x + e.width : area.x + area.width;
     int y0 = e.y > area.y ? e.y : area.y, y1 = e.y + e.height < area.y + area.height ? e.y + e.height : area.y + area.height;
+    int radius = RADIUS * scale, reach = SHADOW * scale;
 
     for (int y = y0; y < y1; y++) {
-        uint32_t *row = c->pixels + (long)(y - oy) * c->stride - ox;
+        uint32_t *row = c->pixels + (long)(y - area.y) * c->stride - area.x;
         int dy = y < s.y ? s.y - y : y >= s.y + s.height ? y - (s.y + s.height - 1) : 0;
         bool beside_frame = y >= f.y && y < f.y + f.height;
 
-        bool corner_row = y < f.y + RADIUS || y >= f.y + f.height - RADIUS;
+        bool corner_row = y < f.y + radius || y >= f.y + f.height - radius;
 
         for (int x = x0; x < x1; x++) {
             // The window covers this part, but for its rounded corners.
-            if (beside_frame && x >= f.x && x < f.x + f.width && (!corner_row || (x >= f.x + RADIUS && x < f.x + f.width - RADIUS))) {
-                x = corner_row ? f.x + f.width - RADIUS - 1 : f.x + f.width - 1;
+            if (beside_frame && x >= f.x && x < f.x + f.width && (!corner_row || (x >= f.x + radius && x < f.x + f.width - radius))) {
+                x = corner_row ? f.x + f.width - radius - 1 : f.x + f.width - 1;
                 continue;
             }
 
             int dx = x < s.x ? s.x - x : x >= s.x + s.width ? x - (s.x + s.width - 1) : 0;
-            uint32_t a = dx > SHADOW || dy > SHADOW ? 0 : falloff[dx][dy] * w->shadow >> 8;
+            uint32_t a = dx > reach || dy > reach ? 0 : falloff[dx / scale][dy / scale] * w->shadow >> 8;
 
             // In a rounded corner, only what's outside the curve has the shadow.
             if (beside_frame && x >= f.x && x < f.x + f.width) {
@@ -583,9 +590,11 @@ static void draw_shadow(struct gui_canvas *c, const struct window *w, int ox, in
     }
 }
 
-// An app's icon, loaded the first time it's wanted, or the plain program icon.
+// An app's icon, loaded the first time it's wanted, or the plain program icon: at
+// 2x, the one drawn for it, or else the 1x one, drawn twice the size.
 static const struct gui_image *app_icon(const char *name) {
     char path[sizeof(ICONS) + 16 + GUI_TITLE_MAX];
+    struct gui_image *image;
 
     for (int i = 0; i < icon_count; i++) {
         if (!strcmp(icons[i].name, name))
@@ -594,28 +603,41 @@ static const struct gui_image *app_icon(const char *name) {
     if (icon_count == MAX_ICONS)
         return NULL;
     snprintf(icons[icon_count].name, sizeof(icons[icon_count].name), "%s", name);
-    if (name[0])
-        snprintf(path, sizeof(path), ICONS "/apps/%s.png", name);
-    else
-        snprintf(path, sizeof(path), ICONS "/program.png");
-    gui_image_load(path, &icons[icon_count++].image);
+    image = &icons[icon_count++].image;
+    for (int at = scale > 1 ? scale : 1; at >= 1 && !image->pixels; at--) {
+        const char *suffix = at > 1 ? "@2x" : "";
+
+        if (name[0])
+            snprintf(path, sizeof(path), ICONS "/apps/%s%s.png", name, suffix);
+        else
+            snprintf(path, sizeof(path), ICONS "/program%s.png", suffix);
+        if (gui_image_load(path, image))
+            image->scale = at;
+    }
     return app_icon(name);
 }
 
+// When the scale changes, they're loaded again for it.
+static void forget_icons(void) {
+    for (int i = 0; i < icon_count; i++)
+        gui_image_free(&icons[i].image);
+    icon_count = 0;
+}
+
 static void make_coverage(void) {
-    for (int y = 0; y < RADIUS; y++) {
-        for (int x = 0; x < RADIUS; x++)
-            coverage[y][x] = gui_corner_coverage(x, y, RADIUS);
+    for (int y = 0; y < RADIUS * scale; y++) {
+        for (int x = 0; x < RADIUS * scale; x++)
+            coverage[y][x] = gui_corner_coverage(x, y, RADIUS * scale);
     }
 }
 
 // A rectangle's corners, kept before it's drawn, or rounded after, on a canvas
 // that's the part of the screen from ox, oy.
-static void keep_corners(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS]) {
+static void keep_corners(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t kept[4][GUI_KEPT][GUI_KEPT]) {
     gui_keep_corners(c, r.x - ox, r.y - oy, r.width, r.height, RADIUS, kept);
 }
 
-static void round_corners(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS],
+static void round_corners(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t kept[4][GUI_KEPT][GUI_KEPT],
                           uint32_t line) {
     gui_round_corners(c, r.x - ox, r.y - oy, r.width, r.height, RADIUS, kept, line);
 }
@@ -625,10 +647,10 @@ static void blend_fill(struct gui_canvas *c, int x, int y, int width, int height
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + width > c->width ? c->width : x + width, y1 = y + height > c->height ? c->height : y + height;
 
-    for (int row = y0; row < y1; row++) {
+    for (int row = y0 * scale; row < y1 * scale; row++) {
         uint32_t *p = c->pixels + (long)row * c->stride;
 
-        for (int col = x0; col < x1; col++)
+        for (int col = x0 * scale; col < x1 * scale; col++)
             p[col] = gui_mix(p[col], color, alpha);
     }
 }
@@ -644,16 +666,25 @@ static int bar_alpha(void) {
     return settings.transparency ? BAR_ALPHA : 256;
 }
 
-// Part of a canvas, each pixel the average of those up to BLUR away, across then down.
+// The average of taps pixels, from sums of red and blue together, and green, which
+// stay apart as each is under 2^16 for up to 257 taps.
+static uint32_t average(uint32_t rb, uint32_t g, int taps) {
+    return ((rb >> 16) / taps) << 16 | ((rb & 0xFFFF) / taps) | ((g / taps) & 0x00FF00);
+}
+
+// Part of a canvas, each pixel the average of those up to BLUR of the desktop's
+// pixels away, across then down, with sums that move along, so it costs as much
+// however far it reaches. In the display's pixels.
 static void blur(struct gui_canvas *c, int x, int y, int width, int height) {
     if (!settings.blur || !settings.transparency)
         return;
     static uint32_t *across;
     static size_t size;
-    int x0 = x < 0 ? 0 : x, x1 = x + width > c->width ? c->width : x + width;
-    int y0 = y < 0 ? 0 : y, y1 = y + height > c->height ? c->height : y + height;
-    int top = y0 - BLUR < 0 ? 0 : y0 - BLUR, bottom = y1 + BLUR > c->height ? c->height : y1 + BLUR;
-    int w = x1 - x0, taps = 2 * BLUR + 1;
+    int reach = BLUR * scale, taps = 2 * reach + 1, cw = c->width * scale, ch = c->height * scale;
+    int x0 = x < 0 ? 0 : x * scale, x1 = x + width > c->width ? cw : (x + width) * scale;
+    int y0 = y < 0 ? 0 : y * scale, y1 = y + height > c->height ? ch : (y + height) * scale;
+    int top = y0 - reach < 0 ? 0 : y0 - reach, bottom = y1 + reach > ch ? ch : y1 + reach;
+    int w = x1 - x0;
     size_t needed = (size_t)w * (bottom - top);
 
     if (w <= 0 || y1 <= y0)
@@ -667,31 +698,36 @@ static void blur(struct gui_canvas *c, int x, int y, int width, int height) {
     }
     for (int row = top; row < bottom; row++) {
         const uint32_t *p = c->pixels + (long)row * c->stride;
+        uint32_t *out = across + (long)(row - top) * w - x0;
+        uint32_t rb = 0, g = 0;
 
+        for (int k = x0 - reach; k <= x0 + reach; k++) {
+            uint32_t q = p[k < 0 ? 0 : k >= cw ? cw - 1 : k];
+
+            rb += q & 0xFF00FF, g += q & 0x00FF00;
+        }
         for (int col = x0; col < x1; col++) {
-            uint32_t rb = 0, g = 0;
+            uint32_t in = p[col + reach + 1 >= cw ? cw - 1 : col + reach + 1], gone = p[col - reach < 0 ? 0 : col - reach];
 
-            for (int k = -BLUR; k <= BLUR; k++) {
-                int at = col + k < 0 ? 0 : col + k >= c->width ? c->width - 1 : col + k;
-
-                rb += p[at] & 0xFF00FF, g += p[at] & 0x00FF00;
-            }
-            across[(long)(row - top) * w + col - x0] = ((rb >> 16) / taps) << 16 | ((rb & 0xFFFF) / taps) | ((g / taps) & 0x00FF00);
+            out[col] = average(rb, g, taps);
+            rb += (in & 0xFF00FF) - (gone & 0xFF00FF), g += (in & 0x00FF00) - (gone & 0x00FF00);
         }
     }
-    for (int row = y0; row < y1; row++) {
-        uint32_t *p = c->pixels + (long)row * c->stride;
+    for (int col = x0; col < x1; col++) {
+        const uint32_t *q = across + col - x0;
+        uint32_t rb = 0, g = 0;
 
-        for (int col = x0; col < x1; col++) {
-            uint32_t rb = 0, g = 0;
+        for (int k = y0 - reach; k <= y0 + reach; k++) {
+            uint32_t v = q[(long)((k < top ? top : k >= bottom ? bottom - 1 : k) - top) * w];
 
-            for (int k = -BLUR; k <= BLUR; k++) {
-                int at = row + k < top ? top : row + k >= bottom ? bottom - 1 : row + k;
-                uint32_t q = across[(long)(at - top) * w + col - x0];
+            rb += v & 0xFF00FF, g += v & 0x00FF00;
+        }
+        for (int row = y0; row < y1; row++) {
+            int next = row + reach + 1 >= bottom ? bottom - 1 : row + reach + 1, last = row - reach < top ? top : row - reach;
+            uint32_t in = q[(long)(next - top) * w], gone = q[(long)(last - top) * w];
 
-                rb += q & 0xFF00FF, g += q & 0x00FF00;
-            }
-            p[col] = ((rb >> 16) / taps) << 16 | ((rb & 0xFFFF) / taps) | ((g / taps) & 0x00FF00);
+            c->pixels[(long)row * c->stride + col] = average(rb, g, taps);
+            rb += (in & 0xFF00FF) - (gone & 0xFF00FF), g += (in & 0x00FF00) - (gone & 0x00FF00);
         }
     }
 }
@@ -719,11 +755,11 @@ static void draw_contents(struct gui_canvas *c, const struct window *w, int ox, 
         return;
     }
     blur(c, x, y, w->canvas.width, w->canvas.height);
-    for (int row = y0; row < y1; row++) {
-        const uint32_t *from = w->canvas.pixels + (long)(row - y) * w->canvas.stride - x;
+    for (int row = y0 * scale; row < y1 * scale; row++) {
+        const uint32_t *from = w->canvas.pixels + (long)(row - y * scale) * w->canvas.stride - x * scale;
         uint32_t *to = c->pixels + (long)row * c->stride;
 
-        for (int col = x0; col < x1; col++) {
+        for (int col = x0 * scale; col < x1 * scale; col++) {
             uint32_t p = from[col];
 
             to[col] = p >> 24 ? gui_mix(p, to[col], p >> 24) : p;
@@ -738,7 +774,7 @@ static bool rounded(const struct window *w) {
 }
 
 static void draw_window(struct gui_canvas *c, const struct window *w, int ox, int oy) {
-    uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS];
+    uint32_t kept[4][GUI_KEPT][GUI_KEPT];
     struct rect frame = frame_of(w);
     bool round = rounded(w) && !drawing_layer;
 
@@ -824,7 +860,7 @@ static void fitted_text(struct gui_canvas *c, int x, int y, int width, const cha
 // like windows'.
 // The taskbar, its flyouts, notifications and the switcher: rounded, outlined and see-through, blurring what's under them.
 static void draw_glass(struct gui_canvas *c, struct rect r, int ox, int oy) {
-    uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS];
+    uint32_t kept[4][GUI_KEPT][GUI_KEPT];
     int x = r.x - ox, y = r.y - oy;
 
     keep_corners(c, r, ox, oy, kept);
@@ -940,12 +976,12 @@ static struct rect button_for(const struct window *w) {
 static bool fill_layer(struct gui_canvas *layer, const struct window *w) {
     struct rect f = frame_of(w);
 
-    if (layer->width != f.width || layer->height != f.height) {
-        uint32_t *pixels = realloc(layer->pixels, (size_t)f.width * f.height * sizeof(uint32_t));
+    if (layer->width != f.width || layer->height != f.height || layer->scale != scale) {
+        uint32_t *pixels = realloc(layer->pixels, (size_t)f.width * f.height * scale * scale * sizeof(uint32_t));
 
         if (!pixels)
             return false;
-        *layer = (struct gui_canvas){pixels, f.width, f.height, f.width};
+        *layer = (struct gui_canvas){pixels, f.width, f.height, f.width * scale, scale};
     }
     drawing_layer = true;
     draw_window(layer, w, f.x, f.y);
@@ -959,6 +995,7 @@ static void draw_layer(struct gui_canvas *c, const struct gui_canvas *layer, str
                        bool round, bool translucent, int ox, int oy) {
     int x0 = r.x - ox < 0 ? 0 : r.x - ox, x1 = r.x + r.width - ox > c->width ? c->width : r.x + r.width - ox;
     int y0 = r.y - oy < 0 ? 0 : r.y - oy, y1 = r.y + r.height - oy > c->height ? c->height : r.y + r.height - oy;
+    int lw = layer->width * scale, lh = layer->height * scale, radius = RADIUS * scale;
 
     if (r.width <= 0 || r.height <= 0)
         return;
@@ -969,17 +1006,18 @@ static void draw_layer(struct gui_canvas *c, const struct gui_canvas *layer, str
         outline.canvas.height = r.height - TITLE_HEIGHT - 2 * BORDER;
         draw_shadow(c, &outline, ox, oy);
     }
-    for (int y = y0; y < y1; y++) {
-        int ly = (y + oy - r.y) * layer->height / r.height, cy = ly < layer->height - 1 - ly ? ly : layer->height - 1 - ly;
+    // In the display's pixels, each from the nearest of the layer's.
+    for (int y = y0 * scale; y < y1 * scale; y++) {
+        int ly = (y + (oy - r.y) * scale) * layer->height / r.height, cy = ly < lh - 1 - ly ? ly : lh - 1 - ly;
         const uint32_t *from = layer->pixels + (long)ly * layer->stride;
         uint32_t *to = c->pixels + (long)y * c->stride;
 
-        for (int x = x0; x < x1; x++) {
-            int lx = (x + ox - r.x) * layer->width / r.width, cx = lx < layer->width - 1 - lx ? lx : layer->width - 1 - lx;
+        for (int x = x0 * scale; x < x1 * scale; x++) {
+            int lx = (x + (ox - r.x) * scale) * layer->width / r.width, cx = lx < lw - 1 - lx ? lx : lw - 1 - lx;
             uint32_t p = from[lx];
             int a = translucent ? alpha * (256 - (int)(p >> 24)) / 256 : alpha;
 
-            if (round && cx < RADIUS && cy < RADIUS)
+            if (round && cx < radius && cy < radius)
                 a = a * coverage[cy][cx] / 256;
             to[x] = gui_mix(to[x], p, a);
         }
@@ -2853,17 +2891,42 @@ static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
     }
 }
 
+// The shape's character at x, y, as it's shown, turned or mirrored, and ' ' outside it.
+static char cursor_at(const struct cursor_shape *shape, struct rect r, int x, int y) {
+    if (x < 0 || y < 0 || x >= r.width || y >= r.height)
+        return ' ';
+
+    int col = shape->turned ? y : x, row = shape->turned ? x : y;
+
+    return shape->rows[row][shape->mirrored ? shape->width - 1 - col : col];
+}
+
+// At 2x by Scale2x, which makes each pixel four, following its neighbours' edges, so
+// the diagonals stay smooth rather than going to steps.
 static void draw_cursor(struct gui_canvas *c, int ox, int oy) {
     const struct cursor_shape *shape = &shapes[cursor_shown];
     struct rect r = cursor_rect();
+    int k = scale == 2 ? 2 : 1;
 
     for (int y = 0; y < r.height; y++) {
         for (int x = 0; x < r.width; x++) {
-            int col = shape->turned ? y : x, row = shape->turned ? x : y;
-            char p = shape->rows[row][shape->mirrored ? shape->width - 1 - col : col];
+            char p = cursor_at(shape, r, x, y), up = cursor_at(shape, r, x, y - 1), down = cursor_at(shape, r, x, y + 1);
+            char left = cursor_at(shape, r, x - 1, y), right = cursor_at(shape, r, x + 1, y);
+            char quarter[4] = {p, p, p, p};
 
-            if (p != ' ')
-                gui_fill(c, r.x + x - ox, r.y + y - oy, 1, 1, p == 'X' ? 0x000000 : 0xFFFFFF);
+            if (k == 2 && up != down && left != right) {
+                quarter[0] = left == up ? up : p, quarter[1] = up == right ? right : p;
+                quarter[2] = left == down ? left : p, quarter[3] = down == right ? right : p;
+            }
+            for (int q = 0; q < k * k; q++) {
+                int px = (r.x + x - ox) * scale + q % k * (scale / k), py = (r.y + y - oy) * scale + q / k * (scale / k);
+
+                if (quarter[q] == ' ' || px < 0 || py < 0 || px >= c->width * scale || py >= c->height * scale)
+                    continue;
+                for (int i = 0; i < scale / k; i++) // past 2x, each quarter's square filled
+                    for (int j = 0; j < scale / k; j++)
+                        c->pixels[(long)(py + i) * c->stride + px + j] = quarter[q] == 'X' ? 0x000000 : 0xFFFFFF;
+            }
         }
     }
 }
@@ -2878,10 +2941,11 @@ static void draw_snap(struct gui_canvas *c, int ox, int oy) {
     int y0 = r.y > oy ? r.y : oy, y1 = r.y + r.height < oy + c->height ? r.y + r.height : oy + c->height;
     uint32_t a = TITLE_FOCUSED;
 
-    for (int y = y0; y < y1; y++) {
-        uint32_t *row = c->pixels + (long)(y - oy) * c->stride - ox;
+    inner = scaled(inner);
+    for (int y = y0 * scale; y < y1 * scale; y++) {
+        uint32_t *row = c->pixels + (long)(y - oy * scale) * c->stride - ox * scale;
 
-        for (int x = x0; x < x1; x++) {
+        for (int x = x0 * scale; x < x1 * scale; x++) {
             uint32_t p = row[x];
 
             row[x] = !contains(inner, x, y) ? a
@@ -2983,16 +3047,18 @@ static void make_picture(struct desktop_item *item, const char *path) {
     const struct gui_image *icon = gui_file_icon(item->name, item->folder);
     struct gui_image full;
 
+    // At the display's own resolution.
     if (icon == gui_icon("image") && gui_image_load(path, &full)) {
-        int big = full.width > full.height ? full.width : full.height, w = full.width * DESKTOP_ICON / big,
-            h = full.height * DESKTOP_ICON / big;
+        int big = full.width > full.height ? full.width : full.height, w = full.width * DESKTOP_ICON * scale / big,
+            h = full.height * DESKTOP_ICON * scale / big;
 
         if (!gui_image_scale(&full, w > 0 ? w : 1, h > 0 ? h : 1, &item->picture))
             item->picture = (struct gui_image){0};
         gui_image_free(&full);
-    } else if (!icon || !gui_image_scale(icon, DESKTOP_ICON, DESKTOP_ICON, &item->picture)) {
+    } else if (!icon || !gui_image_scale(icon, DESKTOP_ICON * scale, DESKTOP_ICON * scale, &item->picture)) {
         item->picture = (struct gui_image){0};
     }
+    item->picture.scale = scale;
 }
 
 static void save_layout(void) {
@@ -3091,10 +3157,13 @@ static void load_desktop(bool always) {
 
 // Half the colour over what's there.
 static void tint(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t colour) {
-    for (int y = r.y - oy < 0 ? 0 : r.y - oy; y < r.y + r.height - oy && y < c->height; y++) {
+    int w = c->width * scale, h = c->height * scale;
+
+    r = scaled((struct rect){r.x - ox, r.y - oy, r.width, r.height});
+    for (int y = r.y < 0 ? 0 : r.y; y < r.y + r.height && y < h; y++) {
         uint32_t *row = c->pixels + (long)y * c->stride;
 
-        for (int x = r.x - ox < 0 ? 0 : r.x - ox; x < r.x + r.width - ox && x < c->width; x++)
+        for (int x = r.x < 0 ? 0 : r.x; x < r.x + r.width && x < w; x++)
             row[x] = ((row[x] >> 1) & 0x7F7F7F) + ((colour >> 1) & 0x7F7F7F);
     }
 }
@@ -3109,8 +3178,8 @@ static void draw_desktop(struct gui_canvas *c, int ox, int oy) {
         if (i == desktop_selected)
             tint(c, r, ox, oy, TITLE_FOCUSED);
         if (item->picture.pixels)
-            gui_draw_image(c, r.x + (r.width - item->picture.width) / 2 - ox,
-                           r.y + 6 + (DESKTOP_ICON - item->picture.height) / 2 - oy, &item->picture);
+            gui_draw_image(c, r.x + (r.width - item->picture.width / scale) / 2 - ox,
+                           r.y + 6 + (DESKTOP_ICON - item->picture.height / scale) / 2 - oy, &item->picture);
         snprintf(label, sizeof(label), "%.10s", item->name);
         width = gui_text_width(label, 1);
         gui_text(c, r.x + (r.width - width) / 2 + 1 - ox, r.y + DESKTOP_ICON + 13 - oy, label, 0x000000, 1);
@@ -3232,7 +3301,7 @@ static struct {
 } screen_fade;
 
 static void fade_screen(bool hold) {
-    size_t size = (size_t)screen.width * screen.height * sizeof(uint32_t);
+    size_t size = (size_t)screen.width * screen.height * scale * scale * sizeof(uint32_t);
 
     if (screen_fade.was && (screen_fade.width != screen.width || screen_fade.height != screen.height)) {
         free(screen_fade.was);
@@ -3242,8 +3311,9 @@ static void fade_screen(bool hold) {
         return;
     screen_fade.width = screen.width;
     screen_fade.height = screen.height;
-    for (int y = 0; y < screen.height; y++)
-        memcpy(screen_fade.was + (long)y * screen.width, screen.pixels + (long)y * screen.stride, screen.width * sizeof(uint32_t));
+    for (int y = 0; y < screen.height * scale; y++)
+        memcpy(screen_fade.was + (long)y * screen.width * scale, screen.pixels + (long)y * screen.stride,
+               screen.width * scale * sizeof(uint32_t));
     screen_fade.holding = hold;
     screen_fade.start = now_ms();
     add_damage((struct rect){0, 0, screen.width, screen.height});
@@ -3685,12 +3755,13 @@ static void draw_choosing(struct gui_canvas *c, int ox, int oy) {
     struct rect a = choosing.dragging ? chosen_area() : (struct rect){0}, h = choosing_hint();
     char size[32];
 
-    for (int y = 0; y < c->height; y++) {
-        const uint32_t *from = choosing.pixels + (long)(y + oy) * screen.width + ox;
+    a = scaled(a);
+    for (int y = 0; y < c->height * scale; y++) {
+        const uint32_t *from = choosing.pixels + (long)(y + oy * scale) * screen.width * scale + ox * scale;
         uint32_t *to = c->pixels + (long)y * c->stride;
 
-        for (int x = 0; x < c->width; x++)
-            to[x] = contains(a, x + ox, y + oy) ? from[x] : from[x] >> 1 & 0x7F7F7F;
+        for (int x = 0; x < c->width * scale; x++)
+            to[x] = contains(a, x + ox * scale, y + oy * scale) ? from[x] : from[x] >> 1 & 0x7F7F7F;
     }
     gui_fill_rounded(c, h.x - ox, h.y - oy, h.width, h.height, RADIUS, TASKBAR_COLOR);
     gui_text(c, h.x + 12 - ox, h.y + (h.height - GUI_CHAR_HEIGHT) / 2 - oy, CHOOSING_HINT, TASKBAR_TEXT, 1);
@@ -3740,7 +3811,7 @@ static void draw_flyout(struct gui_canvas *c, struct rect r, int64_t start,
     int t = ease_out(flyout_progress(start)), dy = (256 - t) * FLYOUT_SLIDE / 256 * from_bar();
     int x0 = r.x - ox < 0 ? 0 : r.x - ox, x1 = r.x + r.width - ox > c->width ? c->width : r.x + r.width - ox;
     int y0 = r.y + dy - oy < 0 ? 0 : r.y + dy - oy, y1 = r.y + dy + r.height - oy > c->height ? c->height : r.y + dy + r.height - oy;
-    size_t needed = x1 > x0 && y1 > y0 ? (size_t)(x1 - x0) * (y1 - y0) : 0;
+    size_t needed = x1 > x0 && y1 > y0 ? (size_t)(x1 - x0) * (y1 - y0) * scale * scale : 0;
 
     if (t == 256 || !needed) {
         draw(c, arg, ox, oy - dy);
@@ -3755,6 +3826,7 @@ static void draw_flyout(struct gui_canvas *c, struct rect r, int64_t start,
         }
         under = bigger, size = needed;
     }
+    x0 *= scale, x1 *= scale, y0 *= scale, y1 *= scale; // in the display's pixels
     for (int y = y0; y < y1; y++)
         memcpy(under + (size_t)(y - y0) * (x1 - x0), c->pixels + (long)y * c->stride + x0, (x1 - x0) * sizeof(*under));
     draw(c, arg, ox, oy - dy);
@@ -3775,9 +3847,10 @@ static void flyout_leaves(struct rect r) {
     struct rect at = {x0, y0, (x1 < screen.width ? x1 : screen.width) - x0, (y1 < screen.height ? y1 : screen.height) - y0};
     uint32_t *pixels;
 
-    if (!settings.animations || !(pixels = realloc(flyout_ghost.copy.pixels, (size_t)at.width * at.height * sizeof(uint32_t))))
+    if (!settings.animations
+        || !(pixels = realloc(flyout_ghost.copy.pixels, (size_t)at.width * at.height * scale * scale * sizeof(uint32_t))))
         return;
-    flyout_ghost.copy = (struct gui_canvas){pixels, at.width, at.height, at.width};
+    flyout_ghost.copy = (struct gui_canvas){pixels, at.width, at.height, at.width * scale, scale};
     flyout_ghost.at = at;
     flyout_ghost.r = r;
     flyout_ghost.start = now_ms();
@@ -3793,13 +3866,15 @@ static void draw_flyout_ghost(struct gui_canvas *c, int ox, int oy) {
 
     if (t == 256 || !flyout_ghost.copy.pixels)
         return;
+    // In the display's pixels.
+    r = scaled(r), dy *= scale, ox *= scale, oy *= scale;
     for (int y = r.y + dy; y < r.y + dy + r.height; y++) {
-        const uint32_t *from = flyout_ghost.copy.pixels + (long)(y - dy - flyout_ghost.at.y) * flyout_ghost.copy.stride
-                             - flyout_ghost.at.x;
+        const uint32_t *from = flyout_ghost.copy.pixels + (long)(y - dy - flyout_ghost.at.y * scale) * flyout_ghost.copy.stride
+                             - flyout_ghost.at.x * scale;
 
-        if (y < oy || y >= oy + c->height)
+        if (y < oy || y >= oy + c->height * scale)
             continue;
-        for (int x = r.x < ox ? ox : r.x; x < r.x + r.width && x < ox + c->width; x++) {
+        for (int x = r.x < ox ? ox : r.x; x < r.x + r.width && x < ox + c->width * scale; x++) {
             uint32_t *to = c->pixels + (long)(y - oy) * c->stride + x - ox;
 
             *to = gui_mix(*to, from[x], 256 - t);
@@ -3937,26 +4012,16 @@ static void make_night(void) {
     }
 }
 
-// A row of the screen on the display's, scale rows high and each pixel scale wide.
-// It's put together in memory first, as reading the framebuffer back is slow.
+// A row of the screen on the display's, with the night light's colours.
 static void show_row(uint8_t *to, const uint32_t *from, int width) {
-    static uint32_t row[MAX_SIZE * 2];
+    uint32_t *out = (uint32_t *)to;
 
-    if (!settings.night_light && scale == 1) {
+    if (!settings.night_light) {
         memcpy(to, from, width * sizeof(uint32_t));
         return;
     }
-    width = width * scale > (int)(sizeof(row) / sizeof(*row)) ? (int)(sizeof(row) / sizeof(*row)) / scale : width;
-    for (int x = 0; x < width; x++) {
-        uint32_t p = settings.night_light
-                       ? (from[x] & 0xFF0000) | night_green[from[x] >> 8 & 0xFF] << 8 | night_blue[from[x] & 0xFF]
-                       : from[x];
-
-        for (int i = 0; i < scale; i++)
-            row[x * scale + i] = p;
-    }
-    for (int i = 0; i < scale; i++)
-        memcpy(to + (long)i * output.pitch, row, width * scale * sizeof(uint32_t));
+    for (int x = 0; x < width; x++)
+        out[x] = (from[x] & 0xFF0000) | night_green[from[x] >> 8 & 0xFF] << 8 | night_blue[from[x] & 0xFF];
 }
 
 // Draws a rectangle of the screen. As what's see-through blurs what's under it,
@@ -3967,44 +4032,43 @@ static void compose(struct rect r) {
     int x0 = r.x - BLUR_MARGIN < 0 ? 0 : r.x - BLUR_MARGIN, y0 = r.y - BLUR_MARGIN < 0 ? 0 : r.y - BLUR_MARGIN;
     int x1 = r.x + r.width + BLUR_MARGIN, y1 = r.y + r.height + BLUR_MARGIN;
     struct rect e = {x0, y0, (x1 < screen.width ? x1 : screen.width) - x0, (y1 < screen.height ? y1 : screen.height) - y0};
-    size_t needed = (size_t)e.width * e.height;
+    size_t needed = (size_t)e.width * e.height * scale * scale;
+    struct gui_canvas area = {pixels, e.width, e.height, e.width * scale, scale};
 
     if (needed > size) {
         uint32_t *bigger = realloc(pixels, needed * sizeof(*pixels));
 
         if (!bigger)
             return;
-        pixels = bigger, size = needed;
+        area.pixels = pixels = bigger, size = needed;
     }
-    draw_area(e, (struct gui_canvas){pixels, e.width, e.height, e.width});
-    for (int row = r.y; row < r.y + r.height; row++)
-        memcpy(screen.pixels + (long)row * screen.stride + r.x, pixels + (long)(row - e.y) * e.width + r.x - e.x,
-               r.width * sizeof(*pixels));
+    draw_area(e, area);
+    gui_copy(&screen, r.x, r.y, &area, r.x - e.x, r.y - e.y, r.width, r.height);
 }
 
 static void redraw(void) {
-    static uint32_t mixed[MAX_SIZE];
+    static uint32_t mixed[MAX_SIZE * GUI_MAX_SCALE];
     int shown = screen_shown();
 
     for (int i = 0; i < damage_count; i++)
         compose(damage[i]);
     for (int i = 0; i < damage_count; i++) {
-        struct rect r = damage[i];
+        struct rect r = scaled(damage[i]); // in the display's pixels, from here
 
         for (int row = r.y; row < r.y + r.height; row++) {
             uint32_t *now = screen.pixels + (long)row * screen.stride + r.x;
 
             // Part way through fading, the row's what was there mixed with what's there now.
             if (shown < 256) {
-                const uint32_t *was = screen_fade.was + (long)row * screen.width + r.x;
+                const uint32_t *was = screen_fade.was + (long)row * screen.width * scale + r.x;
 
                 for (int x = 0; x < r.width; x++)
                     mixed[x] = gui_mix(was[x], now[x], shown);
                 now = mixed;
             }
-            show_row(output.pixels + (long)row * scale * output.pitch + r.x * scale * sizeof(uint32_t), now, r.width);
+            show_row(output.pixels + (long)row * output.pitch + r.x * sizeof(uint32_t), now, r.width);
         }
-        display->changed(r.x * scale, r.y * scale, r.width * scale, r.height * scale);
+        display->changed(r.x, r.y, r.width, r.height);
     }
     if (damage_count)
         display->show();
@@ -4191,12 +4255,11 @@ struct window *wm_window_new(struct surface *s, int width, int height, bool popu
                          ? calloc(1, sizeof(*w))
                          : NULL;
 
-    if (!w || !(w->canvas.pixels = calloc((size_t)width * height, sizeof(uint32_t)))) {
+    if (!w || !(w->canvas.pixels = calloc((size_t)width * height * scale * scale, sizeof(uint32_t)))) {
         free(w);
         return NULL;
     }
-    w->canvas.width = w->canvas.stride = width;
-    w->canvas.height = height;
+    w->canvas = (struct gui_canvas){w->canvas.pixels, width, height, width * scale, scale};
 
     // Each new window goes a little further down and right than the last.
     int step = (next_id - 1) % 8;
@@ -4266,7 +4329,8 @@ static void ask_size(struct window *w, int width, int height) {
 
 // A new size, as the app chose after being asked, or for itself.
 static bool take_size(struct window *w, int width, int height) {
-    uint32_t *pixels = width <= MAX_SIZE && height <= MAX_SIZE ? calloc((size_t)width * height, sizeof(uint32_t)) : NULL;
+    uint32_t *pixels = width <= MAX_SIZE && height <= MAX_SIZE ? calloc((size_t)width * height * scale * scale, sizeof(uint32_t))
+                                                               : NULL;
 
     if (!pixels)
         return false;
@@ -4276,7 +4340,7 @@ static bool take_size(struct window *w, int width, int height) {
     if (w->resize_edges & EDGE_TOP)
         w->y += w->canvas.height - height;
     free(w->canvas.pixels);
-    w->canvas = (struct gui_canvas){pixels, width, height, width};
+    w->canvas = (struct gui_canvas){pixels, width, height, width * scale, scale};
     if (w->login) // which sizes itself, rather than being asked to
         center(w);
     if (w->bare) {
@@ -4292,9 +4356,9 @@ static bool take_size(struct window *w, int width, int height) {
 
 void wm_window_pixels(struct window *w, const uint32_t *pixels, int width, int height, int stride, int x, int y,
                       int changed_width, int changed_height) {
-    struct gui_canvas from = {(uint32_t *)pixels, width, height, stride};
+    struct gui_canvas from = {(uint32_t *)pixels, width, height, stride, scale};
 
-    if (width != w->canvas.width || height != w->canvas.height) {
+    if (width != w->canvas.width || height != w->canvas.height || w->canvas.scale != scale) {
         if (!take_size(w, width, height))
             return;
         x = y = 0, changed_width = width, changed_height = height;
@@ -4528,20 +4592,21 @@ static void open_file(const char *path) {
     }
 }
 
-// Puts pixels on the clipboard, as a picture.
+// Puts pixels on the clipboard, as a picture, every one of the canvas's own.
 static bool copy_picture(const struct gui_canvas *from) {
-    size_t row = (size_t)from->width * sizeof(uint32_t);
-    char *copy = malloc(row * from->height);
+    int width = from->width * gui_scale_of(from), height = from->height * gui_scale_of(from);
+    size_t row = (size_t)width * sizeof(uint32_t);
+    char *copy = malloc(row * height);
 
     if (!copy)
         return false;
-    for (int y = 0; y < from->height; y++)
+    for (int y = 0; y < height; y++)
         memcpy(copy + y * row, from->pixels + (long)y * from->stride, row);
     free(clipboard);
     clipboard = copy;
-    clipboard_length = row * from->height;
-    clipboard_width = from->width;
-    clipboard_height = from->height;
+    clipboard_length = row * height;
+    clipboard_width = width;
+    clipboard_height = height;
     server_set_clipboard(clipboard, clipboard_length, clipboard_width, clipboard_height);
     return true;
 }
@@ -4596,14 +4661,16 @@ static void screenshot(bool window) {
     compose(r);
     no_cursor = false;
     add_damage(r); // to put the cursor back
-    save_shot(&(struct gui_canvas){screen.pixels + (long)r.y * screen.stride + r.x, r.width, r.height, screen.stride});
+    struct gui_canvas shot = gui_part(&screen, r.x, r.y, r.width, r.height);
+
+    save_shot(&shot);
 }
 
 static void start_choosing(void) {
     struct rect all = {0, 0, screen.width, screen.height};
     uint32_t *pixels;
 
-    if (choosing.pixels || !(pixels = malloc((size_t)screen.width * screen.height * sizeof(uint32_t))))
+    if (choosing.pixels || !(pixels = malloc((size_t)screen.width * screen.height * scale * scale * sizeof(uint32_t))))
         return;
     close_menu();
     close_panel();
@@ -4612,8 +4679,9 @@ static void start_choosing(void) {
     no_cursor = true;
     compose(all);
     no_cursor = false;
-    for (int y = 0; y < screen.height; y++)
-        memcpy(pixels + (long)y * screen.width, screen.pixels + (long)y * screen.stride, screen.width * sizeof(uint32_t));
+    for (int y = 0; y < screen.height * scale; y++)
+        memcpy(pixels + (long)y * screen.width * scale, screen.pixels + (long)y * screen.stride,
+               screen.width * scale * sizeof(uint32_t));
     choosing.pixels = pixels;
     choosing.dragging = false;
     add_damage(all);
@@ -4654,7 +4722,11 @@ static void choose_with_mouse(uint32_t pressed, uint32_t released, bool moved) {
 
         r = on_screen(w ? frame_of(w) : (struct rect){0, 0, screen.width, screen.height});
     }
-    save_shot(&(struct gui_canvas){choosing.pixels + (long)r.y * screen.width + r.x, r.width, r.height, screen.width});
+    struct gui_canvas was = {choosing.pixels, screen.width, screen.height, screen.width * scale, scale};
+
+    struct gui_canvas shot = gui_part(&was, r.x, r.y, r.width, r.height);
+
+    save_shot(&shot);
     stop_choosing();
 }
 
@@ -5847,7 +5919,8 @@ static void load_wallpaper(void) {
     struct gui_image image;
 
     gui_wallpaper_get(path);
-    if (!strcmp(path, wallpaper_path) && wallpaper.width == screen.width && wallpaper.height == screen.height)
+    if (!strcmp(path, wallpaper_path) && wallpaper.width == screen.width && wallpaper.height == screen.height
+        && wallpaper.scale == scale)
         return;
     snprintf(wallpaper_path, sizeof(wallpaper_path), "%s", path);
     gui_image_free(&wallpaper_image);
@@ -5859,9 +5932,11 @@ static void load_wallpaper(void) {
         return;
     }
 
-    bool wider = (long)screen.width * image.height >= (long)screen.height * image.width;
-    int width = wider ? screen.width : (int)((long)image.width * screen.height / image.height);
-    int height = wider ? (int)((long)image.height * screen.width / image.width) : screen.height;
+    // To cover the display, in its own pixels.
+    int sw = screen.width * scale, sh = screen.height * scale;
+    bool wider = (long)sw * image.height >= (long)sh * image.width;
+    int width = wider ? sw : (int)((long)image.width * sh / image.height);
+    int height = wider ? (int)((long)image.height * sw / image.width) : sh;
     bool ok = gui_image_scale(&image, width, height, &wallpaper_image);
 
     gui_image_free(&image);
@@ -5872,8 +5947,8 @@ static void load_wallpaper(void) {
     for (long i = 0; i < (long)width * height; i++)
         wallpaper_image.pixels[i] &= 0xFFFFFF;
     wallpaper = (struct gui_canvas){
-        wallpaper_image.pixels + (long)(height - screen.height) / 2 * width + (width - screen.width) / 2,
-        screen.width, screen.height, width,
+        wallpaper_image.pixels + (long)(height - sh) / 2 * width + (width - sw) / 2,
+        screen.width, screen.height, width, scale,
     };
 }
 
@@ -5916,15 +5991,20 @@ static void fit_screen(void) {
 
     if (screen.pixels && to == scale && width == screen.width && height == screen.height)
         return;
-    if (!(pixels = malloc((size_t)width * height * sizeof(uint32_t)))) {
+    if (!(pixels = malloc((size_t)width * height * to * to * sizeof(uint32_t)))) {
         quitting = true; // the old screen could run off the display's
         return;
     }
     cursor_x = screen.pixels ? (int)((long)cursor_x * width / screen.width) : width / 2;
     cursor_y = screen.pixels ? (int)((long)cursor_y * height / screen.height) : height / 2;
     free(screen.pixels);
-    screen = (struct gui_canvas){pixels, width, height, width};
-    scale = to;
+    screen = (struct gui_canvas){pixels, width, height, width * to, to};
+    if (scale != to) { // icons for it, and corners as smooth as it can show
+        scale = to;
+        gui_use_scale(scale);
+        forget_icons();
+        make_coverage();
+    }
     damage_count = 0; // clipped to the old size, so they could run off this one
     add_damage((struct rect){0, 0, width, height});
     if (was.width > 0) {

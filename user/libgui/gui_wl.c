@@ -43,7 +43,7 @@ struct gui_backend_window {
     struct xdg_toplevel *toplevel;
     struct buffer buffers[BUFFERS];
     uint32_t *shown; // what was last given, to send only what's changed
-    int width, height; // of the buffers
+    int width, height, scale; // of the buffers, in their own pixels
     bool configured, translucent;
     int asked_width, asked_height; // what the compositor last asked for
     enum gui_cursor cursor;
@@ -129,13 +129,26 @@ static void post_screen(int width, int height, bool can_resize, int scale) {
     post_to_all((struct gui_message){.type = GUI_SCREEN, .width = width, .height = height, .x = can_resize, .y = scale});
 }
 
-// aximos-shell's events.
+static int scale_now(void) {
+    return wl.scale > 1 ? (wl.scale < GUI_MAX_SCALE ? wl.scale : GUI_MAX_SCALE) : 1;
+}
+
+// aximos-shell's events. A new scale asks every window to be drawn again, at it.
 static void shell_screen(void *data, struct aximos_shell_v1 *shell, int32_t width, int32_t height, uint32_t can_set_mode,
                          uint32_t scale) {
+    int was = scale_now();
+
     (void)data, (void)shell;
     wl.output_width = width, wl.output_height = height;
     wl.can_resize = can_set_mode, wl.scale = scale;
+    gui_use_scale(scale_now());
     post_screen(width, height, can_set_mode, scale);
+    for (int i = 0; was != scale_now() && i < (int)(sizeof(wl.windows) / sizeof(wl.windows[0])); i++) {
+        struct gui_window *w = wl.windows[i];
+
+        if (w)
+            post_to(w, (struct gui_message){.type = GUI_RESIZE, .width = w->canvas.width, .height = w->canvas.height});
+    }
 }
 
 static void shell_settings(void *data, struct aximos_shell_v1 *shell) {
@@ -654,8 +667,9 @@ static const struct xdg_toplevel_listener toplevel_listener = {
     .wm_capabilities = (void *)pointer_nothing};
 
 static bool new_canvas(struct gui_window *window, int width, int height) {
-    uint32_t *pixels = calloc((size_t)width * height, sizeof(uint32_t));
-    uint32_t *shown = calloc((size_t)width * height, sizeof(uint32_t));
+    int scale = scale_now();
+    uint32_t *pixels = calloc((size_t)width * height * scale * scale, sizeof(uint32_t));
+    uint32_t *shown = calloc((size_t)width * height * scale * scale, sizeof(uint32_t));
 
     if (!pixels || !shown) {
         free(pixels);
@@ -664,7 +678,8 @@ static bool new_canvas(struct gui_window *window, int width, int height) {
     }
     free(window->canvas.pixels);
     free(window->backend->shown);
-    window->canvas = (struct gui_canvas){.pixels = pixels, .width = width, .height = height, .stride = width};
+    window->canvas = (struct gui_canvas){.pixels = pixels, .width = width, .height = height, .stride = width * scale,
+                                         .scale = scale};
     window->backend->shown = shown;
     return true;
 }
@@ -745,18 +760,19 @@ void gui_destroy_window(struct gui_window *window) {
 }
 
 // What changed in part of the canvas, put in shown, row by row, narrowed to what
-// really did. Returns false if nothing did.
+// really did, all in the canvas's own pixels. Returns false if nothing did.
 static bool copy_changes(struct gui_window *window, int *x, int *y, int *width, int *height) {
     const struct gui_canvas *c = &window->canvas;
     uint32_t *shown = window->backend->shown;
-    int x0 = *x < 0 ? 0 : *x, y0 = *y < 0 ? 0 : *y;
-    int right = *x + *width < c->width ? *x + *width : c->width;
-    int bottom = *y + *height < c->height ? *y + *height : c->height;
+    int k = gui_scale_of(c), w = c->width * k, h = c->height * k;
+    int x0 = *x < 0 ? 0 : *x * k, y0 = *y < 0 ? 0 : *y * k;
+    int right = (*x + *width) * k < w ? (*x + *width) * k : w;
+    int bottom = (*y + *height) * k < h ? (*y + *height) * k : h;
     int top = -1, last = 0, left = right, end = x0;
 
     for (int row = y0; row < bottom; row++) {
         const uint32_t *from = c->pixels + (long)row * c->stride;
-        uint32_t *to = shown + (long)row * c->width;
+        uint32_t *to = shown + (long)row * w;
         int l = x0, r = right - 1;
 
         while (l < right && from[l] == to[l])
@@ -823,11 +839,14 @@ void gui_update(struct gui_window *window, int x, int y, int width, int height) 
     struct buffer *buffer;
 
     // A new size means new buffers, all of whose pixels are new.
-    if (b->width != window->canvas.width || b->height != window->canvas.height) {
+    int k = gui_scale_of(&window->canvas);
+
+    if (b->width != window->canvas.width * k || b->height != window->canvas.height * k || b->scale != k) {
         free_buffers(b);
-        b->width = window->canvas.width, b->height = window->canvas.height;
-        x = y = 0, width = b->width, height = b->height;
+        b->width = window->canvas.width * k, b->height = window->canvas.height * k, b->scale = k;
+        x = y = 0, width = window->canvas.width, height = window->canvas.height;
         memset(b->shown, 0xFF, (size_t)b->width * b->height * sizeof(uint32_t)); // so all of it differs
+        wl_surface_set_buffer_scale(b->surface, k);
     }
     if (!copy_changes(window, &x, &y, &width, &height))
         return;

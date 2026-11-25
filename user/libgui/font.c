@@ -19,7 +19,7 @@
 #define CELL_CACHE 2048 // characters in cells kept drawn, past ASCII
 #define SANS_EM 13 // pixels to its em, which makes it look the size of the monospaced one
 #define MAX_FONT (4 * 1024 * 1024)
-#define MAX_SCALE 4
+#define MAX_SCALE 8 // text's own scale, times the canvas's
 
 struct glyph {
     uint8_t *coverage; // how much of each pixel the glyph covers, out of 255
@@ -133,14 +133,16 @@ static uint32_t blend(uint32_t under, uint32_t color, uint32_t a) {
          | ((((color & 0x00FF00) * a + (under & 0x00FF00) * keep) >> 8) & 0x00FF00);
 }
 
-// A glyph, with its pen at x and its baseline at y.
+// A glyph, with its pen at x and its baseline at y, in the canvas's own pixels.
 static void blit(struct gui_canvas *canvas, int x, int y, const struct glyph *g, uint32_t color) {
+    int width = canvas->width * gui_scale_of(canvas), height = canvas->height * gui_scale_of(canvas);
+
     if (!g->coverage || x + g->x + g->width <= 0)
         return;
     for (int row = 0; row < g->height; row++) {
         int py = y + g->y + row;
 
-        if (py < 0 || py >= canvas->height)
+        if (py < 0 || py >= height)
             continue;
 
         uint32_t *line = canvas->pixels + (long)py * canvas->stride;
@@ -149,28 +151,29 @@ static void blit(struct gui_canvas *canvas, int x, int y, const struct glyph *g,
         for (int col = 0; col < g->width; col++) {
             int px = x + g->x + col;
 
-            if (cover[col] && px >= 0 && px < canvas->width)
+            if (cover[col] && px >= 0 && px < width)
                 line[px] = cover[col] == 255 ? color : blend(line[px], color, cover[col]);
         }
     }
 }
 
+// Glyphs at the canvas's scale, each where it would be at 1x, so text is as wide.
 static bool draw(bool mono, struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
-    struct face *f = face_for(mono, scale);
+    int k = gui_scale_of(canvas);
+    struct face *f = face_for(mono, scale * k);
 
     if (!f)
         return false;
 
-    struct size *s = size_of(f, scale);
+    struct size *s = size_of(f, scale * k), *laid = size_of(f, scale);
 
     if (y >= canvas->height || y + GUI_CHAR_HEIGHT * scale <= 0)
         return true;
     for (; *text && x < canvas->width; text++) {
         unsigned char c = (unsigned char)*text < 128 ? (unsigned char)*text : '?';
-        const struct glyph *g = glyph_of(f, s, c);
 
-        blit(canvas, x, y + s->baseline, g, color);
-        x += mono ? GUI_CHAR_WIDTH * scale : g->advance;
+        blit(canvas, x * k, y * k + s->baseline, glyph_of(f, s, c), color);
+        x += mono ? GUI_CHAR_WIDTH * scale : glyph_of(f, laid, c)->advance;
     }
     return true;
 }
@@ -199,32 +202,33 @@ static struct cell_glyph {
 } cell_glyphs[CELL_CACHE];
 
 bool font_cell(struct gui_canvas *canvas, int x, int y, uint32_t cp, int cells, bool bold, uint32_t color) {
-    struct face *mono = face_numbered(bold ? 2 : 0, 1), *f = mono;
+    int k = gui_scale_of(canvas);
+    struct face *mono = face_numbered(bold ? 2 : 0, k), *f = mono;
 
     if (!mono && bold)
-        mono = f = face_numbered(0, 1);
+        mono = f = face_numbered(0, k);
     if (!mono)
         return false;
-    if (!stbtt_FindGlyphIndex(&f->info, (int)cp) && !((f = face_numbered(1, 1)) && stbtt_FindGlyphIndex(&f->info, (int)cp)))
+    if (!stbtt_FindGlyphIndex(&f->info, (int)cp) && !((f = face_numbered(1, k)) && stbtt_FindGlyphIndex(&f->info, (int)cp)))
         return false;
 
-    uint8_t kind = f == mono ? (bold ? 2 : 1) : 2 + cells;
+    uint8_t kind = (f == mono ? (bold ? 2 : 1) : 2 + cells) + 8 * k; // at each scale its own
     struct cell_glyph *c = &cell_glyphs[(cp * 31 + kind) % CELL_CACHE];
-    struct size *s = size_of(mono, 1);
+    struct size *s = size_of(mono, k);
 
     if (c->cp != cp || c->kind != kind) { // made, or made again in the place of another
-        float scale = f == mono ? s->scale : size_of(f, 1)->scale;
+        float scale = f == mono ? s->scale : size_of(f, k)->scale;
         int advance, unused;
 
         free(c->g.coverage);
         *c = (struct cell_glyph){.cp = cp, .kind = kind};
         stbtt_GetCodepointHMetrics(&f->info, (int)cp, &advance, &unused);
-        if (advance * scale > GUI_CHAR_WIDTH * cells)
-            scale = (float)(GUI_CHAR_WIDTH * cells) / advance;
+        if (advance * scale > GUI_CHAR_WIDTH * cells * k)
+            scale = (float)(GUI_CHAR_WIDTH * cells * k) / advance;
         c->g.advance = (int)(advance * scale + 0.5f);
         c->g.coverage = stbtt_GetCodepointBitmap(&f->info, scale, scale, (int)cp, &c->g.width, &c->g.height, &c->g.x, &c->g.y);
         c->g.made = true;
     }
-    blit(canvas, x + (GUI_CHAR_WIDTH * cells - c->g.advance) / 2, y + s->baseline, &c->g, color);
+    blit(canvas, x * k + (GUI_CHAR_WIDTH * cells * k - c->g.advance) / 2, y * k + s->baseline, &c->g, color);
     return true;
 }

@@ -94,14 +94,16 @@ static void draw_zoomed(struct gui_canvas *c) {
     int right = x0 + image.width * zoom < c->width ? (int)(x0 + image.width * zoom) : c->width;
     int bottom = y0 + image.height * zoom < c->height ? (int)(y0 + image.height * zoom) : c->height;
 
-    for (int y = top; y < bottom; y++) {
-        int sy = (int)((y - y0) / zoom);
+    int k = gui_scale_of(c);
+
+    for (int y = top * k; y < bottom * k; y++) {
+        int sy = (int)(((double)y / k - y0) / zoom);
         const uint32_t *from = image.pixels + (long)(sy < image.height ? sy : image.height - 1) * image.width;
         uint32_t *to = c->pixels + (long)y * c->stride;
 
-        for (int x = left; x < right; x++) {
-            int sx = (int)((x - x0) / zoom);
-            to[x] = over(from[sx < image.width ? sx : image.width - 1], check_at(x - left, y - top));
+        for (int x = left * k; x < right * k; x++) {
+            int sx = (int)(((double)x / k - x0) / zoom);
+            to[x] = over(from[sx < image.width ? sx : image.width - 1], check_at(x / k - left, y / k - top));
         }
     }
 }
@@ -145,21 +147,25 @@ static void draw(void) {
         w = w > 0 ? w : 1;
         h = h > 0 ? h : 1;
     }
-    if (fitted.width != w || fitted.height != h) {
+    int k = gui_scale_of(c); // fitted to the screen's own pixels
+
+    if (fitted.width != w * k || fitted.height != h * k) {
         gui_image_free(&fitted);
-        if (w == image.width && h == image.height)
+        if (w * k == image.width && h * k == image.height && k == 1)
             fitted = (struct gui_image){0};
-        else if (!gui_image_scale(&image, w, h, &fitted))
+        else if (gui_image_scale(&image, w * k, h * k, &fitted))
+            fitted.scale = k;
+        else
             fitted = (struct gui_image){0};
     }
 
     const struct gui_image *shown = fitted.pixels ? &fitted : &image;
-    int x = (c->width - shown->width) / 2, y = (c->height - shown->height) / 2;
+    int x = (c->width - w) / 2, y = (c->height - h) / 2;
 
-    for (int cy = 0; cy < shown->height; cy += CHECK) {
-        for (int cx = 0; cx < shown->width; cx += CHECK)
-            gui_fill(c, x + cx, y + cy, CHECK < shown->width - cx ? CHECK : shown->width - cx,
-                     CHECK < shown->height - cy ? CHECK : shown->height - cy, (cx / CHECK + cy / CHECK) % 2 ? CHECK_DARK : CHECK_LIGHT);
+    for (int cy = 0; cy < h; cy += CHECK) {
+        for (int cx = 0; cx < w; cx += CHECK)
+            gui_fill(c, x + cx, y + cy, CHECK < w - cx ? CHECK : w - cx, CHECK < h - cy ? CHECK : h - cy,
+                     (cx / CHECK + cy / CHECK) % 2 ? CHECK_DARK : CHECK_LIGHT);
     }
     gui_draw_image(c, x, y, shown);
     show(c);

@@ -64,8 +64,8 @@ struct surface {
     struct wlr_xdg_popup *popup;
     struct wlr_xwayland_surface *xsurface;
     struct surface *parent; // a popup's
-    uint32_t *pixels;       // its surfaces, put together, width by height
-    int width, height;
+    uint32_t *pixels;       // its surfaces, put together, width by height, at scale
+    int width, height, scale;
     int x, y; // where an X window was last put, or a popup is relative to its parent's contents
     bool translucent;
     bool keys[MAX_KEYS];
@@ -264,11 +264,13 @@ struct gather {
     int origin_x, origin_y; // where the contents start in the root surface
 };
 
+// Each of the window's pixels, at the desktop's scale, from the nearest of the
+// surface's buffer, at its own: the same, or an X app's, at 1x, made twice the size.
 static void copy_surface(struct wlr_surface *surface, int sx, int sy, void *data) {
     struct gather *g = data;
     struct surface *s = g->s;
     struct wlr_buffer *buffer = surface->current.buffer;
-    int scale = surface->current.scale > 0 ? surface->current.scale : 1;
+    int scale = surface->current.scale > 0 ? surface->current.scale : 1, k = s->scale;
     void *from;
     uint32_t format;
     size_t stride;
@@ -287,13 +289,12 @@ static void copy_surface(struct wlr_surface *surface, int sx, int sy, void *data
         y1 = y1 < s->height ? y1 : s->height;
         x0 = x0 > 0 ? x0 : 0, y0 = y0 > 0 ? y0 : 0;
 
-        // A buffer drawn at a higher scale is shown at the desktop's, a pixel from each scale square.
-        for (int y = y0; y < y1; y++) {
-            const uint32_t *row = (const uint32_t *)((const uint8_t *)from + (size_t)(y - top) * scale * stride);
-            uint32_t *to = s->pixels + (size_t)y * s->width;
+        for (int y = y0 * k; y < y1 * k; y++) {
+            const uint32_t *row = (const uint32_t *)((const uint8_t *)from + (size_t)((y - top * k) * scale / k) * stride);
+            uint32_t *to = s->pixels + (size_t)y * s->width * k;
 
-            for (int x = x0; x < x1; x++) {
-                uint32_t p = row[(x - left) * scale];
+            for (int x = x0 * k; x < x1 * k; x++) {
+                uint32_t p = row[(x - left * k) * scale / k];
                 uint32_t a = p >> 24;
 
                 // Wayland's alpha is how solid, with the colour already multiplied by it; wm's
@@ -328,13 +329,13 @@ static void gather(struct surface *s, struct wlr_surface *committed) {
 
     if (width <= 0 || height <= 0)
         return;
-    if (width != s->width || height != s->height) {
-        uint32_t *pixels = calloc((size_t)width * height, sizeof(uint32_t));
+    if (width != s->width || height != s->height || s->scale != server.scale) {
+        uint32_t *pixels = calloc((size_t)width * height * server.scale * server.scale, sizeof(uint32_t));
 
         if (!pixels)
             return;
         free(s->pixels);
-        s->pixels = pixels, s->width = width, s->height = height;
+        s->pixels = pixels, s->width = width, s->height = height, s->scale = server.scale;
     } else if (committed == s->surface && wl_list_empty(&s->surface->current.subsurfaces_above)
                && wl_list_empty(&s->surface->current.subsurfaces_below)) {
         // With no other surfaces, only what the app says it changed.
@@ -348,7 +349,7 @@ static void gather(struct surface *s, struct wlr_surface *committed) {
         return;
     wlr_surface_for_each_surface(s->surface, copy_surface, &into);
     if (s->window)
-        wm_window_pixels(s->window, s->pixels, s->width, s->height, s->width, into.box.x1, into.box.y1,
+        wm_window_pixels(s->window, s->pixels, s->width, s->height, s->width * s->scale, into.box.x1, into.box.y1,
                          into.box.x2 - into.box.x1, into.box.y2 - into.box.y1);
 }
 
@@ -397,15 +398,20 @@ static void on_commit(struct wl_listener *l, void *data) {
 // A subsurface committing changes its window.
 static void on_subsurface_commit(struct wl_listener *l, void *data);
 
+// Every surface, each told the desktop's scale, which apps draw their buffers at.
 struct subsurface {
+    struct wl_list link;
     struct wlr_surface *surface;
     struct wl_listener commit, destroy;
 };
+
+static struct wl_list all_surfaces = {&all_surfaces, &all_surfaces};
 
 static void on_subsurface_destroy(struct wl_listener *l, void *data) {
     struct subsurface *sub = wl_container_of(l, sub, destroy);
 
     (void)data;
+    wl_list_remove(&sub->link);
     wl_list_remove(&sub->commit.link);
     wl_list_remove(&sub->destroy.link);
     free(sub);
@@ -431,6 +437,10 @@ static void on_new_surface(struct wl_listener *l, void *data) {
     if (!sub)
         return;
     sub->surface = surface;
+    wl_list_insert(&all_surfaces, &sub->link);
+    wlr_surface_set_preferred_buffer_scale(surface, server.scale);
+    if (server.output)
+        wlr_surface_send_enter(surface, server.output);
     sub->commit.notify = on_subsurface_commit;
     wl_signal_add(&surface->events.commit, &sub->commit);
     sub->destroy.notify = on_subsurface_destroy;
@@ -1000,7 +1010,7 @@ struct wm_source {
 };
 
 static bool encode_png(const char *pixels, int width, int height, char **out, size_t *length) {
-    struct gui_canvas c = {(uint32_t *)pixels, width, height, width};
+    struct gui_canvas c = {(uint32_t *)pixels, width, height, width, 1};
     int fd = memfd_create("clipboard", MFD_CLOEXEC);
     char path[64];
     off_t size;
@@ -1661,8 +1671,11 @@ static bool set_mode(struct screen *screen, int width, int height) {
     return ok && new_pixels();
 }
 
+// Apps hear of it, to draw at it, and wm's windows are copied again at it meanwhile.
 static void set_scale(int scale) {
     struct wlr_output_state state;
+    struct subsurface *sub;
+    struct surface *s;
 
     if (scale == server.scale || !server.output)
         return;
@@ -1671,6 +1684,11 @@ static void set_scale(int scale) {
     wlr_output_state_set_scale(&state, scale);
     wlr_output_commit_state(server.output, &state);
     wlr_output_state_finish(&state);
+    wl_list_for_each(sub, &all_surfaces, link) wlr_surface_set_preferred_buffer_scale(sub->surface, scale);
+    wl_list_for_each(s, &server.surfaces, link) {
+        if (s->window)
+            gather(s, NULL);
+    }
 }
 
 static void changed(int x, int y, int width, int height) {

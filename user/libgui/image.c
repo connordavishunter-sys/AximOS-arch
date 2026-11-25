@@ -154,19 +154,25 @@ bool gui_image_scale(const struct gui_image *from, int width, int height, struct
     return true;
 }
 
+// In the canvas's own pixels, each from the nearest of the image's.
 void gui_draw_image(struct gui_canvas *canvas, int x, int y, const struct gui_image *image) {
+    int k = gui_scale_of(canvas), own = image->scale > 1 ? image->scale : 1;
+    int width = image->width * k / own, height = image->height * k / own;
+
+    x *= k, y *= k;
+
     int x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0;
-    int x1 = x + image->width > canvas->width ? canvas->width - x : image->width;
-    int y1 = y + image->height > canvas->height ? canvas->height - y : image->height;
+    int x1 = x + width > canvas->width * k ? canvas->width * k - x : width;
+    int y1 = y + height > canvas->height * k ? canvas->height * k - y : height;
 
     for (int row = y0; row < y1; row++) {
-        const uint32_t *from = image->pixels + (long)row * image->width;
+        const uint32_t *from = image->pixels + (long)(row * own / k) * image->width;
         uint32_t *to = canvas->pixels + (long)(y + row) * canvas->stride + x;
 
         // Red and blue together, then green, with alpha out of 256 so that the
         // shift keeps the channels apart.
         for (int col = x0; col < x1; col++) {
-            uint32_t p = from[col], a = (p >> 24) + (p >> 31), q = to[col];
+            uint32_t p = from[col * own / k], a = (p >> 24) + (p >> 31), q = to[col];
 
             if (a == 256)
                 to[col] = p & 0xFFFFFF;
@@ -178,25 +184,39 @@ void gui_draw_image(struct gui_canvas *canvas, int x, int y, const struct gui_im
 }
 
 #define ICONS GUI_SHARE "/icons"
-#define MAX_ICONS 16
+#define MAX_ICONS 64
 
+static int icon_scale = 1;
+
+void gui_use_scale(int scale) {
+    icon_scale = scale > 1 ? scale : 1;
+}
+
+// At 2x, the icon drawn for it, or the 1x one, which is drawn twice the size.
 const struct gui_image *gui_icon(const char *name) {
     static struct {
         char name[32];
+        int scale;
         struct gui_image image; // no pixels when there's no such icon
     } icons[MAX_ICONS];
     static int count;
     char path[sizeof(ICONS) + 40];
 
     for (int i = 0; i < count; i++) {
-        if (!strcmp(icons[i].name, name))
+        if (!strcmp(icons[i].name, name) && icons[i].scale == icon_scale)
             return icons[i].image.pixels ? &icons[i].image : NULL;
     }
     if (count == MAX_ICONS || strlen(name) >= sizeof(icons[0].name))
         return NULL;
-    snprintf(path, sizeof(path), ICONS "/%s.png", name);
     strcpy(icons[count].name, name);
-    gui_image_load(path, &icons[count].image);
+    icons[count].scale = icon_scale;
+    snprintf(path, sizeof(path), ICONS "/%s@2x.png", name);
+    if (icon_scale >= 2 && gui_image_load(path, &icons[count].image))
+        icons[count].image.scale = 2;
+    else {
+        snprintf(path, sizeof(path), ICONS "/%s.png", name);
+        gui_image_load(path, &icons[count].image);
+    }
     return icons[count++].image.pixels ? &icons[count - 1].image : NULL;
 }
 

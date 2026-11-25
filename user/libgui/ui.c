@@ -88,7 +88,27 @@ static struct gui_canvas clipped(const struct gui_ui *ui) {
     struct gui_canvas *w = &ui->window->canvas;
     struct gui_rect c = ui->layout.clip;
 
-    return (struct gui_canvas){w->pixels + (long)c.y * w->stride + c.x, c.width, c.height, w->stride};
+    return gui_part(w, c.x, c.y, c.width, c.height);
+}
+
+// The window's pixels in the popup's rectangle, kept as they are, or put back.
+static struct gui_canvas popup_kept(const struct gui_ui *ui) {
+    int s = gui_scale_of(&ui->window->canvas);
+
+    return (struct gui_canvas){ui->popup_pixels, ui->popup_rect.width, ui->popup_rect.height, ui->popup_rect.width * s, s};
+}
+
+static void keep_popup(struct gui_ui *ui) {
+    int s = gui_scale_of(&ui->window->canvas);
+    struct gui_rect r = ui->popup_rect;
+
+    free(ui->popup_pixels);
+    ui->popup_pixels = malloc((size_t)r.width * r.height * s * s * sizeof(uint32_t));
+    if (ui->popup_pixels) {
+        struct gui_canvas kept = popup_kept(ui);
+
+        gui_copy(&kept, 0, 0, &ui->window->canvas, r.x, r.y, r.width, r.height);
+    }
 }
 
 static void fill(struct gui_ui *ui, int x, int y, int width, int height, uint32_t color) {
@@ -341,10 +361,12 @@ void gui_ui_begin(struct gui_ui *ui) {
 
 void gui_ui_end(struct gui_ui *ui) {
     // A dialog dims what's under it.
-    for (int y = 0; ui->dimmed && y < ui->window->canvas.height; y++) {
-        uint32_t *p = ui->window->canvas.pixels + (long)y * ui->window->canvas.stride;
+    struct gui_canvas *w = &ui->window->canvas;
 
-        for (int x = 0; x < ui->window->canvas.width; x++)
+    for (int y = 0; ui->dimmed && y < w->height * gui_scale_of(w); y++) {
+        uint32_t *p = w->pixels + (long)y * w->stride;
+
+        for (int x = 0; x < w->width * gui_scale_of(w); x++)
             p[x] = (p[x] >> 1) & 0x7F7F7F;
     }
     if (!ui->dimmed)
@@ -353,7 +375,7 @@ void gui_ui_end(struct gui_ui *ui) {
     // The popup goes back over whatever was drawn on it after.
     if (ui->popup_pixels) {
         struct gui_rect r = ui->popup_rect;
-        struct gui_canvas saved = {ui->popup_pixels, r.width, r.height, r.width};
+        struct gui_canvas saved = popup_kept(ui);
 
         gui_copy(&ui->window->canvas, r.x, r.y, &saved, 0, 0, r.width, r.height);
         free(ui->popup_pixels);
@@ -1537,7 +1559,7 @@ static void popup_end(struct gui_ui *ui, int bottom) {
     struct gui_rect *r = &ui->popup_rect;
     struct gui_canvas *w = &ui->window->canvas;
 
-    uint32_t below[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS];
+    uint32_t below[4][GUI_KEPT][GUI_KEPT];
 
     ui->layout.clip = whole(ui);
     r->height = bottom + 4 - r->y;
@@ -1547,11 +1569,7 @@ static void popup_end(struct gui_ui *ui, int bottom) {
     draw_border(ui, *r, SEPARATOR);
     gui_round_corners(w, r->x, r->y, r->width, r->height, ROUND_POPUP, ui->popup_corners, SEPARATOR);
     *r = intersect(*r, whole(ui));
-    free(ui->popup_pixels);
-    ui->popup_pixels = malloc((size_t)r->width * r->height * sizeof(uint32_t));
-    for (int row = 0; ui->popup_pixels && row < r->height; row++)
-        memcpy(ui->popup_pixels + (long)row * r->width, w->pixels + (long)(r->y + row) * w->stride + r->x,
-               r->width * sizeof(uint32_t));
+    keep_popup(ui);
     ui->layout.clip = ui->outside_popup;
     ui->in_popup = false;
 }
@@ -2083,13 +2101,8 @@ int gui_dialog(struct gui_ui *ui, const char *message, const char *const *button
     ui->layout.clip = was;
 
     // Kept, to go back over what comes after, and everything else is left without input.
-    free(ui->popup_pixels);
     ui->popup_rect = intersect(r, all);
-    ui->popup_pixels = malloc((size_t)ui->popup_rect.width * ui->popup_rect.height * sizeof(uint32_t));
-    for (int i = 0; ui->popup_pixels && i < ui->popup_rect.height; i++)
-        memcpy(ui->popup_pixels + (long)i * ui->popup_rect.width,
-               ui->window->canvas.pixels + (long)(ui->popup_rect.y + i) * ui->window->canvas.stride + ui->popup_rect.x,
-               ui->popup_rect.width * sizeof(uint32_t));
+    keep_popup(ui);
     ui->dialog_shown = ui->dimmed = true;
     ui->mouse_in_popup = true;
     ui->mouse_pressed = ui->mouse_released = ui->right_pressed = false;

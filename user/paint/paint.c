@@ -637,14 +637,21 @@ static void scroll_bars(struct gui_ui *ui) {
 static void draw_zoomed(const struct gui_canvas *from) {
     struct gui_canvas *c = &window->canvas;
 
+    int k = gui_scale_of(c);
+
     for (int y = view.y; y < view.y + view.height; y++) {
         int sy = picture_y(y);
-        uint32_t *row = c->pixels + (long)y * c->stride;
 
-        for (int x = view.x; x < view.x + view.width; x++) {
-            int sx = picture_x(x);
+        for (int i = 0; i < k; i++) {
+            uint32_t *row = c->pixels + (long)(y * k + i) * c->stride;
 
-            row[x] = sx < from->width && sy < from->height ? from->pixels[(long)sy * from->stride + sx] : AROUND;
+            for (int x = view.x; x < view.x + view.width; x++) {
+                int sx = picture_x(x);
+                uint32_t p = sx < from->width && sy < from->height ? from->pixels[(long)sy * from->stride + sx] : AROUND;
+
+                for (int j = 0; j < k; j++)
+                    row[x * k + j] = p;
+            }
         }
     }
 }
@@ -705,7 +712,7 @@ static void show_picture(struct gui_ui *ui, struct gui_rect area) {
         struct gui_canvas *c = &window->canvas;
         int x0 = view.x + zoomed(selection.x) - scroll_x - 1, y0 = view.y + zoomed(selection.y) - scroll_y - 1;
         int x1 = view.x + zoomed(selection.x + selection.width) - scroll_x, y1 = view.y + zoomed(selection.y + selection.height) - scroll_y;
-        struct gui_canvas clip = {c->pixels + (long)view.y * c->stride + view.x, view.width, view.height, c->stride};
+        struct gui_canvas clip = gui_part(c, view.x, view.y, view.width, view.height);
 
         for (int x = x0; x <= x1; x++) {
             uint32_t dash = (x / 4) % 2 ? WHITE : 0;

@@ -21,13 +21,14 @@ static bool clip(const struct gui_canvas *canvas, int *x, int *y, int *width, in
 }
 
 void gui_fill(struct gui_canvas *canvas, int x, int y, int width, int height, uint32_t color) {
+    int s = gui_scale_of(canvas);
+
     if (!clip(canvas, &x, &y, &width, &height))
         return;
+    for (int row = y * s; row < (y + height) * s; row++) {
+        uint32_t *p = canvas->pixels + (long)row * canvas->stride + x * s;
 
-    for (int row = y; row < y + height; row++) {
-        uint32_t *p = canvas->pixels + (long)row * canvas->stride + x;
-
-        for (int i = 0; i < width; i++)
+        for (int i = 0; i < width * s; i++)
             p[i] = color;
     }
 }
@@ -49,9 +50,20 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
     sx += dx - x;
     sy += dy - y;
 
-    for (int row = 0; row < height; row++)
-        memcpy(canvas->pixels + (long)(dy + row) * canvas->stride + dx,
-               from->pixels + (long)(sy + row) * from->stride + sx, width * sizeof(uint32_t));
+    int to_scale = gui_scale_of(canvas), from_scale = gui_scale_of(from);
+
+    // At the same scale, row by row; at another, each pixel from the nearest.
+    for (int row = 0; row < height * to_scale; row++) {
+        uint32_t *to = canvas->pixels + (long)(dy * to_scale + row) * canvas->stride + dx * to_scale;
+        const uint32_t *in = from->pixels + (long)(sy * from_scale + row * from_scale / to_scale) * from->stride
+                           + sx * from_scale;
+
+        if (to_scale == from_scale)
+            memcpy(to, in, width * to_scale * sizeof(uint32_t));
+        else
+            for (int col = 0; col < width * to_scale; col++)
+                to[col] = in[col * from_scale / to_scale];
+    }
 }
 
 // The bitmap font: each glyph that's on the canvas, and of it only the rows and
@@ -78,9 +90,9 @@ static void bitmap_text(struct gui_canvas *canvas, int x, int y, const char *tex
 
                 if (!(bits & 0x80))
                     continue;
-                if (scale == 1 && px >= 0 && px < canvas->width)
+                if (scale == 1 && canvas->scale <= 1 && px >= 0 && px < canvas->width)
                     canvas->pixels[(long)py * canvas->stride + px] = color;
-                else if (scale > 1)
+                else if (scale > 1 || canvas->scale > 1)
                     gui_fill(canvas, px, py, scale, scale, color);
             }
         }
@@ -146,25 +158,30 @@ static int inside_rounded(int x, int y, int width, int height, int radius) {
 static int fit_radius(int radius, int width, int height) {
     radius = radius < width / 2 ? radius : width / 2;
     radius = radius < height / 2 ? radius : height / 2;
-    return radius > GUI_MAX_RADIUS ? GUI_MAX_RADIUS : radius > 0 ? radius : 0;
+    return radius > GUI_KEPT ? GUI_KEPT : radius > 0 ? radius : 0;
 }
 
+// In the canvas's own pixels, with a line a desktop's pixel wide.
 void gui_frame_rounded(struct gui_canvas *canvas, int x, int y, int width, int height, int radius, uint32_t fill,
                        uint32_t line) {
+    int s = gui_scale_of(canvas);
+
+    x *= s, y *= s, width *= s, height *= s, radius = (radius < GUI_MAX_RADIUS ? radius : GUI_MAX_RADIUS) * s;
+
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
-    int x1 = x + width < canvas->width ? x + width : canvas->width;
-    int y1 = y + height < canvas->height ? y + height : canvas->height;
-    int inner = radius - 1 > 0 ? radius - 1 : 0;
+    int x1 = x + width < canvas->width * s ? x + width : canvas->width * s;
+    int y1 = y + height < canvas->height * s ? y + height : canvas->height * s;
+    int inner = radius - s > 0 ? radius - s : 0;
 
     radius = fit_radius(radius, width, height);
-    inner = fit_radius(inner, width - 2, height - 2);
+    inner = fit_radius(inner, width - 2 * s, height - 2 * s);
     for (int row = y0; row < y1; row++) {
         uint32_t *p = canvas->pixels + (long)row * canvas->stride;
 
         for (int col = x0; col < x1; col++) {
             int px = col - x, py = row - y;
             int out = inside_rounded(px, py, width, height, radius);
-            int in = line == GUI_NONE ? out : inside_rounded(px - 1, py - 1, width - 2, height - 2, inner);
+            int in = line == GUI_NONE ? out : inside_rounded(px - s, py - s, width - 2 * s, height - 2 * s, inner);
 
             if (!out)
                 continue;
@@ -184,17 +201,26 @@ void gui_fill_rounded(struct gui_canvas *canvas, int x, int y, int width, int he
 
 // Each corner's pixels, from the corner, k being 0 to 3 for top left, top right,
 // bottom left and bottom right.
+// All in the canvas's own pixels.
 static uint32_t *corner_pixel(const struct gui_canvas *c, int x, int y, int width, int height, int k, int px, int py) {
     int col = k & 1 ? x + width - 1 - px : x + px, row = k & 2 ? y + height - 1 - py : y + py;
+    int s = gui_scale_of(c);
 
-    if (col < 0 || row < 0 || col >= c->width || row >= c->height)
+    if (col < 0 || row < 0 || col >= c->width * s || row >= c->height * s)
         return NULL;
     return c->pixels + (long)row * c->stride + col;
 }
 
+static int scaled(const struct gui_canvas *c, int *x, int *y, int *width, int *height, int radius) {
+    int s = gui_scale_of(c);
+
+    *x *= s, *y *= s, *width *= s, *height *= s;
+    return fit_radius((radius < GUI_MAX_RADIUS ? radius : GUI_MAX_RADIUS) * s, *width, *height);
+}
+
 void gui_keep_corners(const struct gui_canvas *c, int x, int y, int width, int height, int radius,
-                      uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS]) {
-    radius = fit_radius(radius, width, height);
+                      uint32_t kept[4][GUI_KEPT][GUI_KEPT]) {
+    radius = scaled(c, &x, &y, &width, &height, radius);
     for (int k = 0; k < 4; k++) {
         for (int py = 0; py < radius; py++) {
             for (int px = 0; px < radius; px++) {
@@ -210,14 +236,16 @@ void gui_keep_corners(const struct gui_canvas *c, int x, int y, int width, int h
 // What was kept goes back outside the rounded edge, then the line along it, then
 // what was drawn inside it.
 void gui_round_corners(struct gui_canvas *c, int x, int y, int width, int height, int radius,
-                       uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS], uint32_t line) {
-    radius = fit_radius(radius, width, height);
+                       uint32_t kept[4][GUI_KEPT][GUI_KEPT], uint32_t line) {
+    int s = gui_scale_of(c);
+
+    radius = scaled(c, &x, &y, &width, &height, radius);
     for (int k = 0; k < 4; k++) {
         for (int py = 0; py < radius; py++) {
             for (int px = 0; px < radius; px++) {
                 uint32_t *p = corner_pixel(c, x, y, width, height, k, px, py);
                 int all = gui_corner_coverage(px, py, radius);
-                int in = line == GUI_NONE ? all : px && py ? gui_corner_coverage(px - 1, py - 1, radius - 1) : 0;
+                int in = line == GUI_NONE ? all : px >= s && py >= s ? gui_corner_coverage(px - s, py - s, radius - s) : 0;
 
                 if (!p)
                     continue;

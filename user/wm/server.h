@@ -18,8 +18,9 @@ struct window;  // and as wm has it
 // A new window, width by height, or NULL if there's no room for it. A popup, such as
 // a menu, has no frame, and is at x, y on the desktop.
 struct window *wm_window_new(struct surface *s, int width, int height, bool popup, int x, int y);
-// What the app drew: width by height pixels, 0xAARRGGBB, with alpha only if it's
-// see-through, stride pixels from one row to the next, of which a part changed.
+// What the app drew: width by height of the desktop's pixels, at the display's scale,
+// 0xAARRGGBB, with alpha only if it's see-through, stride of the display's pixels
+// from one row to the next, of which a part changed, in the desktop's pixels.
 void wm_window_pixels(struct window *w, const uint32_t *pixels, int width, int height, int stride, int x, int y,
                       int changed_width, int changed_height);
 void wm_window_title(struct window *w, const char *title);

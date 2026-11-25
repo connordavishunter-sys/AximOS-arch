@@ -98,13 +98,15 @@ static bool draw_block(struct gui_canvas *c, int x, int y, int w, int h, uint32_
     else if (cp >= 0x2591 && cp <= 0x2593) { // light, medium and dark shade
         uint32_t alpha = (cp - 0x2590) * 64;
 
-        for (int row = 0; row < h; row++) {
-            if (y + row < 0 || y + row >= c->height)
-                continue;
-            for (int col = 0; col < w; col++) {
-                uint32_t *p = &c->pixels[(long)(y + row) * c->stride + x + col];
+        int k = gui_scale_of(c);
 
-                if (x + col >= 0 && x + col < c->width) // keeping how see-through it is
+        for (int row = 0; row < h * k; row++) {
+            if (y * k + row < 0 || y * k + row >= c->height * k)
+                continue;
+            for (int col = 0; col < w * k; col++) {
+                uint32_t *p = &c->pixels[(long)(y * k + row) * c->stride + x * k + col];
+
+                if (x * k + col >= 0 && x * k + col < c->width * k) // keeping how see-through it is
                     *p = (*p & 0xFF000000) | gui_mix(*p, color, alpha);
             }
         }

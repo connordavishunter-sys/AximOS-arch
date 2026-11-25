@@ -2,7 +2,7 @@
 and X's (xterm, through XWayland) open in wm's windows and take the keyboard and mouse.
 Each terminal proves what's typed went to it by writing its own TERM."""
 import time
-from vm import VM, USER, check, finish, window_of
+from vm import HEIGHT, WIDTH, VM, USER, check, finish, window_of
 
 vm = VM()
 try:
@@ -14,7 +14,7 @@ try:
     # The desktop is on the screen: more than a few colours, as the wallpaper, taskbar and text have.
     width, height, pixel = vm.screenshot()
     colours = {pixel(x, y) for x in range(0, width, 16) for y in range(0, height, 16)}
-    check('the desktop is shown', (width, height) == (1280, 800) and len(colours) > 50, (width, height, len(colours)))
+    check('the desktop is shown', (width, height) == (WIDTH, HEIGHT) and len(colours) > 50, (width, height, len(colours)))
     taskbar = {pixel(x, height - 20) for x in range(0, width, 8)}
     check('with its taskbar', len(taskbar) > 3, len(taskbar))
 

@@ -152,8 +152,10 @@ static bool chunk(FILE *f, const char *type, const uint8_t *data, size_t size) {
     return fwrite(head, 1, 8, f) == 8 && fwrite(data, 1, size, f) == size && fwrite(tail, 1, 4, f) == 4;
 }
 
+// Every one of the canvas's own pixels, at whatever scale it is.
 bool gui_image_save(const char *path, const struct gui_canvas *from) {
-    size_t row = 1 + (size_t)from->width * 3, raw_size = row * from->height;
+    int width = from->width * gui_scale_of(from), height = from->height * gui_scale_of(from);
+    size_t row = 1 + (size_t)width * 3, raw_size = row * height;
     uint8_t *raw = malloc(raw_size), *packed = malloc(raw_size + raw_size / 8 + 16), header[13] = {0};
     size_t packed_size = 0;
     FILE *f = NULL;
@@ -163,12 +165,12 @@ bool gui_image_save(const char *path, const struct gui_canvas *from) {
         image_fail("out of memory");
         goto done;
     }
-    for (int y = 0; y < from->height; y++) {
+    for (int y = 0; y < height; y++) {
         uint8_t *r = raw + y * row;
         const uint32_t *p = from->pixels + (long)y * from->stride;
 
         *r++ = 0; // no filter
-        for (int x = 0; x < from->width; x++, r += 3) {
+        for (int x = 0; x < width; x++, r += 3) {
             r[0] = p[x] >> 16;
             r[1] = p[x] >> 8;
             r[2] = p[x];
@@ -178,8 +180,8 @@ bool gui_image_save(const char *path, const struct gui_canvas *from) {
         image_fail("out of memory");
         goto done;
     }
-    put32(header, from->width);
-    put32(header + 4, from->height);
+    put32(header, width);
+    put32(header + 4, height);
     header[8] = 8; // bits a sample
     header[9] = 2; // RGB
     if (!(f = fopen(path, "wb"))) {

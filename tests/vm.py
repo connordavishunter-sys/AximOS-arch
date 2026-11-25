@@ -16,7 +16,8 @@ NAMED = {' ': 'spc', '/': 'slash', '.': 'dot', '-': 'minus', '\\': 'backslash', 
 SHIFTED = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
            '_': 'minus', '+': 'equal', '"': 'apostrophe', ':': 'semicolon', '?': 'slash', '~': 'grave_accent',
            '>': 'dot', '<': 'comma', '|': 'backslash', '{': 'bracket_left', '}': 'bracket_right'}
-WIDTH, HEIGHT = 1280, 800
+SCALE = int(os.environ.get('TEST_SCALE', '1'))  # 2 boots at 2560x1600, which wm draws at 2x
+WIDTH, HEIGHT = 1280 * SCALE, 800 * SCALE
 USER = 'aximos'
 
 
@@ -149,9 +150,9 @@ class VM:
             self.key(key_for(c))
 
     def pointer(self, x, y, buttons=None):
-        """Puts the tablet's pointer on pixel x, y of the screen, then sets the buttons
-        held: 1 left, 2 right, 4 middle."""
-        axis = lambda name, at, size: {'type': 'abs', 'data': {'axis': name, 'value': at * 0x7FFF // (size - 1)}}
+        """Puts the tablet's pointer on x, y of the desktop, as wm counts its pixels,
+        then sets the buttons held: 1 left, 2 right, 4 middle."""
+        axis = lambda name, at, size: {'type': 'abs', 'data': {'axis': name, 'value': at * SCALE * 0x7FFF // (size - 1)}}
         self.qmp_command('input-send-event', events=[axis('x', x, WIDTH), axis('y', y, HEIGHT)])
         time.sleep(0.1)
         if buttons is not None:

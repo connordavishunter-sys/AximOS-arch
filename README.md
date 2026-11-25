@@ -18,12 +18,14 @@ live ISO that boots straight into the desktop, tested in QEMU.
 Phase two, under way: the tray's network icon opens a Wi-Fi panel, on NetworkManager,
 listing the networks nearby and the cable, joining open, secured and hidden networks,
 leaving and forgetting them, and turning Wi-Fi off, as airplane mode does too. The
-brightness keys and slider set the backlight through logind, as its file is root's.
+brightness keys and slider set the backlight through logind, as its file is root's. On
+screens 2560 wide or more, everything's drawn at 2x, at the screen's own resolution:
+wm, libgui's apps, whose canvases are laid out as at 1x and drawn twice as sharp, and
+Wayland apps such as foot, at their own 2x. X apps draw at 1x, made twice the size.
 
 Still to come: Settings as a front end for NetworkManager, UPower and timedated; an
 installer; dragging
-files between wm's desktop and apps; screens beyond the first; and drawing at the
-screen's own resolution at 2x, which apps' HiDPI buffers are scaled down from for now.
+files between wm's desktop and apps; and screens beyond the first.
 
 ## How it fits together
 
@@ -32,7 +34,10 @@ screen's own resolution at 2x, which apps' HiDPI buffers are scaled down from fo
   and the session, through libseat. wm draws the whole desktop in memory, as it always
   has, which is put on the screen as a texture each frame. Apps get only shared memory
   buffers, which are copied into wm's windows as they commit, so wm can blur, round and
-  animate them like its own.
+  animate them like its own. At 2x, wm and every window are drawn at the screen's own
+  resolution, and only laid out in the desktop's pixels, each two of the screen's across.
+- **Icons** are 16x16, with a 32x32 one for 2x beside each, `name@2x.png`, which
+  `tools/icons.py` draws.
 - **libgui** (`user/libgui`) is a Wayland client: each window is an xdg-shell toplevel,
   drawn from shared memory, with the clipboard and dragging files on Wayland's data
   device. That's cleaner than keeping its own socket protocol beside Wayland: wm has one
@@ -75,6 +80,6 @@ with no screen at all. `kill -USR1` saves what it's showing to
 
 It boots straight into the desktop as `aximos`, whose password, for the lock screen, is
 `aximos`. It has Arch's base and kernel, NetworkManager, PipeWire with WirePlumber,
-UPower, `nvidia-open` for NVIDIA's GPUs, `foot` and `xterm`. The serial port has a root
+UPower, `nvidia-open` for NVIDIA's GPUs, `foot`, `xterm` and DejaVu's fonts. The serial port has a root
 shell, for the tests, and hostapd and dnsmasq, which the Wi-Fi test makes access points
 of simulated radios with.

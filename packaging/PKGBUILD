@@ -34,7 +34,7 @@ _take() {
 
 package_aximos-libgui() {
     pkgdesc='AximOS libgui: the toolkit its apps draw with, as Wayland clients, and its sound library'
-    depends=(wayland libxkbcommon libpulse libxcrypt mpg123 lame flac libvorbis libogg opus faad2 faac libwebp)
+    depends=(wayland libxkbcommon libpulse libxcrypt mpg123 lame flac libvorbis libogg opus faad2 faac libwebp ttf-dejavu)
     _install_all
     _take usr/lib/libgui.so usr/lib/libaximos.so usr/lib/libaudio.so usr/lib/aximos/codecs usr/include/aximos \
         usr/share/aximos/fonts usr/share/aximos/icons
