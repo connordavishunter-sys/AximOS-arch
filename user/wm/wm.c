@@ -20,6 +20,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <systemd/sd-bus.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1674,6 +1675,23 @@ static void show_osd(bool volume_shown) {
     add_damage(osd_rect());
 }
 
+// The backlight's file is root's, so the logged-in session asks logind, which lets
+// whoever's at the seat set it.
+static bool logind_brightness(int level) {
+    static sd_bus *bus;
+    sd_bus_error e = SD_BUS_ERROR_NULL;
+
+    if (!bus && sd_bus_open_system(&bus) < 0)
+        return false;
+    int r = sd_bus_call_method(bus, "org.freedesktop.login1", "/org/freedesktop/login1/session/auto",
+                               "org.freedesktop.login1.Session", "SetBrightness", &e, NULL, "ssu", "backlight",
+                               strrchr(backlight, '/') + 1, (uint32_t)level);
+    if (r < 0)
+        printf("wm: couldn't set the brightness: %s\n", e.message ? e.message : strerror(-r));
+    sd_bus_error_free(&e);
+    return r >= 0;
+}
+
 // Never quite dark, which would look like the screen had gone off.
 static void set_brightness(int level) {
     char path[GUI_PATH_MAX + 16];
@@ -1683,10 +1701,11 @@ static void set_brightness(int level) {
     if (!backlight[0] || level == brightness)
         return;
     snprintf(path, sizeof(path), "%s/brightness", backlight);
-    if (!(f = fopen(path, "w")))
-        return;
-    fprintf(f, "%d\n", level);
-    if (fclose(f) != 0)
+    if ((f = fopen(path, "w"))) {
+        fprintf(f, "%d\n", level);
+        if (fclose(f) != 0)
+            return;
+    } else if (!logind_brightness(level))
         return;
     brightness = level;
     printf("wm: brightness %d\n", brightness_percent());

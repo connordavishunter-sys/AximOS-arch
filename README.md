@@ -17,10 +17,11 @@ live ISO that boots straight into the desktop, tested in QEMU.
 
 Phase two, under way: the tray's network icon opens a Wi-Fi panel, on NetworkManager,
 listing the networks nearby and the cable, joining open, secured and hidden networks,
-leaving and forgetting them, and turning Wi-Fi off, as airplane mode does too.
+leaving and forgetting them, and turning Wi-Fi off, as airplane mode does too. The
+brightness keys and slider set the backlight through logind, as its file is root's.
 
-Still to come: Settings as a front end for NetworkManager, UPower and timedated; the
-brightness keys and slider, which don't work on the laptop yet; an installer; dragging
+Still to come: Settings as a front end for NetworkManager, UPower and timedated; an
+installer; dragging
 files between wm's desktop and apps; screens beyond the first; and drawing at the
 screen's own resolution at 2x, which apps' HiDPI buffers are scaled down from for now.
 
