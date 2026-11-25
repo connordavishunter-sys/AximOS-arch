@@ -20,6 +20,10 @@ nvidia-open
 mesa
 # Logging in: greetd, which runs wm's own log-in screen
 greetd
+# Access points on simulated radios, mac80211_hwsim's, for the tests' Wi-Fi, and
+# dnsmasq, which gives them addresses, as NetworkManager does sharing a connection
+hostapd
+dnsmasq
 # Apps from Arch that run in wm's windows, Wayland's and X's
 foot
 xterm

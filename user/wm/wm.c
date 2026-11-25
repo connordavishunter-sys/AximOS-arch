@@ -1,4 +1,5 @@
 #include <aximos.h>
+#include "network.h"
 #include "server.h"
 #include <arpa/inet.h>
 #include <audio.h>
@@ -1161,10 +1162,10 @@ static void draw_notices(struct gui_canvas *c, int ox, int oy) {
     }
 }
 
-// The tray, left of the clock: quick settings, shown by the network's and the
-// speaker's icons, and notifications, each opening a panel by it. The clock opens
-// a calendar.
-enum { TRAY_QUICK, TRAY_NOTICES, TRAY_CLIPS, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
+// The tray, left of the clock: the clipboard's history, the network, quick settings,
+// shown by the battery's and the speaker's icons, and notifications, each opening a
+// panel by it. The clock opens a calendar.
+enum { TRAY_QUICK, TRAY_NOTICES, TRAY_CLIPS, TRAY_NETWORK, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
 enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILE_QUIET, TILES };
 #define DAY_WIDTH 32
 #define DAY_HEIGHT 24
@@ -1174,7 +1175,7 @@ enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILE_QUIET, TILES };
 #define QUICK_WIDTH 400
 #define TILE_HEIGHT 52
 #define VOLUME_STEP 5
-#define NET_CHECK_MS 5000 // how often the network's looked at, for its icon
+#define NET_CHECK_MS 5000 // how often the battery and the volume are looked at
 static int panel = -1; // the one open
 static int64_t panel_opened, menu_opened; // when they did, to fade them in
 static void autohide(void);
@@ -1184,7 +1185,7 @@ static void autohide(void);
 static char now_playing[GUI_TITLE_MAX];
 static int mixer = -1, volume = 100; // mixer's 0 with a sound card
 static bool muted, setting_volume;
-static struct net_info net;
+static const struct network *net; // as NetworkManager has it
 static int calendar_month; // shown, from this one
 
 // The laptop's battery and backlight, from /sys/class, and the popup their keys
@@ -1205,22 +1206,34 @@ static void lock(void);
 static bool can_lock(void);
 
 static bool connected(void) {
-    return net.has_device && net.address;
+    return net->address != 0;
 }
 
-// With a sound card, the speaker's beside the network.
+// Quick settings has the battery, with one, and the speaker, with a sound card, or
+// the theme's icon with neither.
 static struct rect tray_item(int item) {
     char clock[16];
     int width = gui_text_width(clock_text(clock), 1), right = taskbar().x + taskbar().width - width - 12 - 8;
-    int y = taskbar().y + 4, quick = (mixer >= 0 ? 2 * TRAY_ICON - 4 : TRAY_ICON) + (battery >= 0 ? BATTERY_WIDTH : 0);
+    int y = taskbar().y + 4, quick = (mixer >= 0 ? TRAY_ICON : 0) + (battery >= 0 ? BATTERY_WIDTH : 0);
+    int quick_x = right - TRAY_ICON - (quick ? quick : TRAY_ICON) - 2;
 
     if (item == TRAY_CALENDAR)
         return (struct rect){right + 2, y, width + 16, TASKBAR_HEIGHT - 8};
     if (item == TRAY_NOTICES)
         return (struct rect){right - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
+    if (item == TRAY_NETWORK)
+        return (struct rect){quick_x - 2 - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
     if (item == TRAY_CLIPS)
-        return (struct rect){right - TRAY_ICON - quick - 2 - 2 - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
-    return (struct rect){right - TRAY_ICON - quick - 2, y, quick, TASKBAR_HEIGHT - 8};
+        return (struct rect){quick_x - 2 - TRAY_ICON - 2 - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
+    return (struct rect){quick_x, y, quick ? quick : TRAY_ICON, TASKBAR_HEIGHT - 8};
+}
+
+// Says where the network's and quick settings' icons are, for the tests.
+static void report_tray(void) {
+    struct rect q = tray_item(TRAY_QUICK), n = tray_item(TRAY_NETWORK);
+
+    printf("wm: quick settings' icons at %d %d %d %d\n", q.x, q.y, q.width, q.height);
+    printf("wm: network icon at %d %d %d %d\n", n.x, n.y, n.width, n.height);
 }
 
 static struct rect tray(void) {
@@ -1255,11 +1268,66 @@ static int laptop_height(void) {
     return (backlight[0] ? 32 : 0) + (battery >= 0 ? PANEL_LINE + 4 : 0);
 }
 
+// The Wi-Fi panel, by the network's icon: Wi-Fi's switch, the cable if there's one,
+// the networks nearby, and a row for joining a hidden one. Clicking an open network
+// joins it, and any other opens under its row, for its password, or to leave or
+// forget it. A hidden network's row opens for its name and password.
+#define NETWORK_WIDTH 320
+#define WIFI_ROW 36
+#define WIFI_LINE 34  // each line of what an opened row has under it
+#define WIFI_SHOWN 8  // networks listed at most
+#define SWITCH_WIDTH 36
+static char wifi_opened[SSID_MAX];                 // the network whose row is open, or ""
+static bool hidden_opened;                         // the hidden network's row is open
+static char wifi_name[SSID_MAX], wifi_password[64]; // what's been typed there
+static int wifi_typing;                            // into 0 nothing, 1 the hidden network's name, 2 the password
+static char wifi_message[128];
+enum { FIELD_NONE, FIELD_NAME, FIELD_PASSWORD };
+
+static bool wifi_listed(void) {
+    return net->running && net->wifi_card && net->wifi_on;
+}
+
+static int wifi_shown(void) {
+    return !wifi_listed() ? 0 : net->wifi_count < WIFI_SHOWN ? net->wifi_count : WIFI_SHOWN;
+}
+
+// The open row's place in the list, which is wifi_shown() for the hidden network's, or -1.
+static int wifi_open_index(void) {
+    if (hidden_opened)
+        return wifi_shown();
+    for (int i = 0; wifi_opened[0] && i < wifi_shown(); i++) {
+        if (!strcmp(net->wifi[i].ssid, wifi_opened))
+            return i;
+    }
+    return -1;
+}
+
+static int wifi_open_height(void) {
+    return wifi_open_index() < 0 ? 0 : (hidden_opened ? 2 : 1) * WIFI_LINE + 6;
+}
+
+static int wired_height(void) {
+    return net->cable ? PANEL_LINE + 8 : 0;
+}
+
+// Why there's no list, when there isn't.
+static const char *wifi_note(void) {
+    return !net->running ? "NetworkManager isn't running" : !net->wifi_card ? "No Wi-Fi card" : !net->wifi_on ? "Wi-Fi is off"
+                                                                                                             : NULL;
+}
+
+static int network_height(void) {
+    return 40 + wired_height() + (wifi_note() ? PANEL_LINE + 8 : 0)
+         + (wifi_listed() ? (wifi_shown() + 1) * WIFI_ROW + wifi_open_height() : 0) + (wifi_message[0] ? PANEL_LINE + 4 : 0)
+         + 6;
+}
+
 static struct rect panel_rect(int item) {
-    static const int widths[] = {QUICK_WIDTH, NOTICE_WIDTH, NOTICE_WIDTH, 7 * DAY_WIDTH + 24};
+    static const int widths[] = {QUICK_WIDTH, NOTICE_WIDTH, NOTICE_WIDTH, NETWORK_WIDTH, 7 * DAY_WIDTH + 24};
     int heights[] = {12 + TILE_HEIGHT + 12 + sound_height() + laptop_height() + 9 + 6 * PANEL_LINE + 8,
                      40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8),
-                     40 + (clip_count ? clip_count : 1) * CLIP_ROW, 40 + 7 * DAY_HEIGHT};
+                     40 + (clip_count ? clip_count : 1) * CLIP_ROW, network_height(), 40 + 7 * DAY_HEIGHT};
     struct rect t = tray_item(item);
     int x = t.x + t.width - widths[item], most = screen.width - GAP - widths[item];
 
@@ -1509,11 +1577,8 @@ static void show_mixer(const struct audio_mixer *m) {
         printf("wm: the volume's %d%s\n", volume, muted ? ", muted" : "");
         damage_tray();
     }
-    if (had != mixer) { // the speaker comes or goes beside the network
-        struct rect q = tray_item(TRAY_QUICK);
-
-        printf("wm: quick settings' icons at %d %d %d %d\n", q.x, q.y, q.width, q.height);
-    }
+    if (had != mixer) // the speaker comes or goes beside the battery
+        report_tray();
     load_outputs();
 }
 
@@ -1717,19 +1782,16 @@ static int check_laptop(void) {
 }
 
 // Looks at the network again, redrawing the tray if it's come or gone.
+// The network's icon and quick settings show what NetworkManager's said.
 static void check_network(void) {
-    bool was = connected();
-    struct net_info now;
+    static bool was;
 
-    if (net_info(&now) < 0)
-        now = (struct net_info){0};
-    if (panel == TRAY_QUICK && memcmp(&now, &net, sizeof(now)))
-        add_damage(panel_rect(TRAY_QUICK));
-    net = now;
-    if (connected() != was) {
+    damage_tray();
+    if (panel == TRAY_QUICK || panel == TRAY_NETWORK)
+        add_damage((struct rect){panel_rect(panel).x, 0, panel_rect(panel).width, screen.height});
+    if (connected() != was)
         printf("wm: network %s\n", connected() ? "connected" : "disconnected");
-        add_damage(tray());
-    }
+    was = connected();
 }
 
 static bool leap(int year) {
@@ -1788,6 +1850,9 @@ static void report_panel(int item) {
     }
 }
 
+static void close_wifi_row(void);
+static void report_wifi(void);
+
 static void open_panel(int item) {
     close_panel();
     calendar_month = 0;
@@ -1803,9 +1868,17 @@ static void open_panel(int item) {
         check_network();
         check_battery();
     }
+    if (item == TRAY_NETWORK) {
+        close_wifi_row();
+        wifi_message[0] = '\0';
+        network_scan();
+        printf("wm: wifi panel\n");
+    }
     panel = item;
     panel_opened = now_ms();
     report_panel(item);
+    if (item == TRAY_NETWORK)
+        report_wifi();
     autohide();
     if (item == TRAY_CALENDAR) {
         int year, month;
@@ -1846,19 +1919,385 @@ static void draw_amount(struct gui_canvas *c, struct rect p, int y, const char *
 }
 
 static void draw_network(struct gui_canvas *c, struct rect p, int y, int ox, int oy) {
-    const char *state = net.airplane      ? "Airplane mode"
-                      : !net.has_device ? "No network card"
-                      : !net.address    ? "Not connected"
-                                        : "Connected";
+    const char *state = !net->running                  ? "No NetworkManager"
+                      : connected()                    ? "Connected"
+                      : !net->wifi_on && !net->cable   ? "Airplane mode"
+                      : !net->wifi_card && !net->cable ? "No network card"
+                                                       : "Not connected";
 
     gui_text(c, p.x + 12 - ox, y - oy, "Network", TASKBAR_TEXT, 1);
     gui_text(c, p.x + p.width - 12 - gui_text_width(state, 1) - ox, y - oy, state,
              connected() ? TASKBAR_TEXT : TASKBAR_DIM_TEXT, 1);
-    draw_address(c, p, y + PANEL_LINE, "Address", net.address, ox, oy);
-    draw_address(c, p, y + 2 * PANEL_LINE, "Gateway", net.gateway, ox, oy);
-    draw_address(c, p, y + 3 * PANEL_LINE, "DNS", net.dns, ox, oy);
-    draw_amount(c, p, y + 4 * PANEL_LINE, "Received", net.rx_bytes, ox, oy);
-    draw_amount(c, p, y + 5 * PANEL_LINE, "Sent", net.tx_bytes, ox, oy);
+    draw_address(c, p, y + PANEL_LINE, "Address", net->address, ox, oy);
+    draw_address(c, p, y + 2 * PANEL_LINE, "Gateway", net->gateway, ox, oy);
+    draw_address(c, p, y + 3 * PANEL_LINE, "DNS", net->dns, ox, oy);
+    draw_amount(c, p, y + 4 * PANEL_LINE, "Received", net->rx_bytes, ox, oy);
+    draw_amount(c, p, y + 5 * PANEL_LINE, "Sent", net->tx_bytes, ox, oy);
+}
+
+// Where the Wi-Fi panel's parts are.
+static struct rect wifi_switch(void) {
+    struct rect p = panel_rect(TRAY_NETWORK);
+
+    return (struct rect){p.x + p.width - 12 - SWITCH_WIDTH, p.y + 11, SWITCH_WIDTH, 18};
+}
+
+static struct rect wifi_row(int i) {
+    struct rect p = panel_rect(TRAY_NETWORK);
+    int open = wifi_open_index(), y = p.y + 40 + wired_height() + (wifi_note() ? PANEL_LINE + 8 : 0);
+
+    return (struct rect){p.x + 4, y + i * WIFI_ROW + (open >= 0 && i > open ? wifi_open_height() : 0), p.width - 8, WIFI_ROW};
+}
+
+// A text box under the open row: the hidden network's name above its password.
+static struct rect wifi_field(int field) {
+    struct rect r = wifi_row(wifi_open_index());
+    int line = hidden_opened && field == FIELD_PASSWORD;
+
+    return (struct rect){r.x + 8, r.y + r.height + 2 + line * WIFI_LINE, r.width - 16 - 84, 26};
+}
+
+// The buttons under the open row, on its last line, 0 the rightmost.
+static struct rect wifi_button(int which) {
+    struct rect r = wifi_row(wifi_open_index());
+    int y = r.y + r.height + 2 + (hidden_opened ? WIFI_LINE : 0);
+
+    return (struct rect){r.x + r.width - 8 - 76 - which * 84, y, 76, 26};
+}
+
+static const struct wifi *opened_wifi(void) {
+    int i = wifi_open_index();
+
+    return i >= 0 && !hidden_opened ? &net->wifi[i] : NULL;
+}
+
+// What the open row asks for: a password, for a secured network that isn't saved.
+static bool wifi_needs_password(void) {
+    const struct wifi *w = opened_wifi();
+
+    return hidden_opened || (w && w->secured && !w->saved && !w->active);
+}
+
+// The open row's buttons, rightmost first, or NULL where there's none.
+static void wifi_buttons(const char *labels[2]) {
+    const struct wifi *w = opened_wifi();
+
+    labels[0] = labels[1] = NULL;
+    if (hidden_opened || wifi_needs_password())
+        labels[0] = "Connect";
+    else if (w && w->active)
+        labels[0] = w->saved ? "Forget" : NULL, labels[1] = "Disconnect";
+    else if (w)
+        labels[0] = "Connect", labels[1] = w->saved ? "Forget" : NULL;
+    if (!labels[0])
+        labels[0] = labels[1], labels[1] = NULL;
+}
+
+// Says where the panel's parts are, when that changes, for the tests to find them.
+static void report_wifi(void) {
+    static char last[4096];
+    char now[4096];
+    int n = 0;
+    struct rect s = wifi_switch();
+    const char *labels[2];
+
+    n += snprintf(now + n, sizeof(now) - n, "wm: wifi %s at %d %d %d %d\n", net->wifi_on ? "on" : "off", s.x, s.y,
+                  s.width, s.height);
+    if (net->cable)
+        n += snprintf(now + n, sizeof(now) - n, "wm: wired %s %s\n", net->wired_name,
+                      net->wired ? "connected" : "not connected");
+    for (int i = 0; i < wifi_shown() && n < (int)sizeof(now) - 200; i++) {
+        struct rect r = wifi_row(i);
+        const struct wifi *w = &net->wifi[i];
+
+        n += snprintf(now + n, sizeof(now) - n, "wm: wifi row %d at %d %d %d %d, %s%s%s%s\n", i, r.x, r.y, r.width,
+                      r.height, w->ssid, w->active ? ", connected" : "", w->saved ? ", saved" : "",
+                      w->secured ? ", secured" : "");
+    }
+    if (wifi_listed()) {
+        struct rect r = wifi_row(wifi_shown());
+
+        n += snprintf(now + n, sizeof(now) - n, "wm: wifi row hidden at %d %d %d %d\n", r.x, r.y, r.width, r.height);
+    }
+    if (wifi_open_index() >= 0) {
+        wifi_buttons(labels);
+        for (int field = FIELD_NAME; field <= FIELD_PASSWORD; field++) {
+            struct rect f = wifi_field(field);
+
+            if ((field == FIELD_NAME && hidden_opened) || (field == FIELD_PASSWORD && wifi_needs_password()))
+                n += snprintf(now + n, sizeof(now) - n, "wm: wifi field %s at %d %d %d %d\n",
+                              field == FIELD_NAME ? "name" : "password", f.x, f.y, f.width, f.height);
+        }
+        for (int i = 0; i < 2 && labels[i]; i++) {
+            struct rect b = wifi_button(i);
+
+            n += snprintf(now + n, sizeof(now) - n, "wm: wifi button %s at %d %d %d %d\n", labels[i], b.x, b.y, b.width,
+                          b.height);
+        }
+    }
+    if (strcmp(now, last))
+        fputs(now, stdout);
+    memcpy(last, now, sizeof(last));
+}
+
+// The panel's whole column, as its height changes with what's in it.
+static void damage_network_panel(void) {
+    struct rect p = panel_rect(TRAY_NETWORK);
+
+    add_damage((struct rect){p.x, 0, p.width, screen.height});
+}
+
+static void close_wifi_row(void) {
+    wifi_opened[0] = '\0';
+    hidden_opened = false;
+    wifi_typing = FIELD_NONE;
+    memset(wifi_password, 0, sizeof(wifi_password));
+    wifi_name[0] = '\0';
+}
+
+static void wifi_join(void) {
+    const char *ssid = hidden_opened ? wifi_name : wifi_opened;
+    char name[SSID_MAX];
+
+    if (!ssid[0])
+        return;
+    snprintf(name, sizeof(name), "%s", ssid);
+    if (network_join(name, wifi_needs_password() ? wifi_password : NULL, hidden_opened)) {
+        snprintf(wifi_message, sizeof(wifi_message), "Joining %s...", name);
+        printf("wm: joining %s\n", name);
+        close_wifi_row();
+    } else {
+        snprintf(wifi_message, sizeof(wifi_message), "%s", network_error());
+        printf("wm: can't join %s: %s\n", name, network_error());
+    }
+}
+
+static void wifi_action(const char *label) {
+    char ssid[SSID_MAX];
+
+    snprintf(ssid, sizeof(ssid), "%s", wifi_opened);
+    if (!strcmp(label, "Connect")) {
+        wifi_join();
+    } else if (!strcmp(label, "Disconnect")) {
+        if (network_leave())
+            printf("wm: left %s\n", ssid);
+        close_wifi_row();
+    } else if (!strcmp(label, "Forget")) {
+        bool forgot = network_forget(ssid);
+
+        if (forgot)
+            printf("wm: forgot %s\n", ssid);
+        snprintf(wifi_message, sizeof(wifi_message), forgot ? "Forgot %s" : "%s", forgot ? ssid : network_error());
+        close_wifi_row();
+    }
+}
+
+static void network_click(void) {
+    const char *labels[2];
+    int open = wifi_open_index();
+
+    damage_network_panel();
+    if (contains(wifi_switch(), cursor_x, cursor_y)) {
+        if (network_set_wifi(!net->wifi_on))
+            printf("wm: wifi %s\n", net->wifi_on ? "off" : "on");
+        close_wifi_row();
+        return;
+    }
+    if (open >= 0) {
+        wifi_buttons(labels);
+        for (int i = 0; i < 2 && labels[i]; i++) {
+            if (contains(wifi_button(i), cursor_x, cursor_y)) {
+                wifi_action(labels[i]);
+                return;
+            }
+        }
+        for (int field = FIELD_NAME; field <= FIELD_PASSWORD; field++) {
+            if (contains(wifi_field(field), cursor_x, cursor_y)
+                && (field == FIELD_PASSWORD ? wifi_needs_password() : hidden_opened)) {
+                wifi_typing = field;
+                return;
+            }
+        }
+    }
+    for (int i = 0; i <= wifi_shown() && wifi_listed(); i++) {
+        if (!contains(wifi_row(i), cursor_x, cursor_y))
+            continue;
+        if (i == open) {
+            close_wifi_row();
+            return;
+        }
+        close_wifi_row();
+        wifi_message[0] = '\0';
+        if (i == wifi_shown()) {
+            hidden_opened = true;
+            wifi_typing = FIELD_NAME;
+            return;
+        }
+
+        const struct wifi *w = &net->wifi[i];
+
+        snprintf(wifi_opened, sizeof(wifi_opened), "%s", w->ssid);
+        if (!w->secured && !w->saved && !w->active) {
+            wifi_join(); // an open network, which needs nothing more
+            return;
+        }
+        wifi_typing = wifi_needs_password() ? FIELD_PASSWORD : FIELD_NONE;
+        return;
+    }
+}
+
+// Typing into the open row's boxes: Tab goes between them, Enter joins, and Escape
+// closes the row.
+static bool wifi_key(const struct key_event *e) {
+    char *text = wifi_typing == FIELD_NAME ? wifi_name : wifi_password;
+    size_t size = wifi_typing == FIELD_NAME ? sizeof(wifi_name) : sizeof(wifi_password), length = strlen(text);
+
+    if (panel != TRAY_NETWORK || !wifi_typing)
+        return false;
+    if (!e->pressed)
+        return true;
+    damage_network_panel();
+    if (e->code == KEY_ESCAPE)
+        close_wifi_row();
+    else if (e->code == KEY_ENTER || e->code == (KEY_EXTENDED | KEY_ENTER))
+        wifi_join();
+    else if (e->code == KEY_TAB && hidden_opened)
+        wifi_typing = wifi_typing == FIELD_NAME ? FIELD_PASSWORD : FIELD_NAME;
+    else if (e->code == KEY_BACKSPACE && length)
+        text[length - 1] = '\0';
+    else if (e->text >= ' ' && e->text < 0x7F && length + 1 < size)
+        text[length] = (char)e->text, text[length + 1] = '\0';
+    return true;
+}
+
+// Signal strength as four bars, as many lit as it's strong.
+static void draw_bars(struct gui_canvas *c, int x, int y, int strength, int ox, int oy) {
+    int lit = strength > 75 ? 4 : strength > 50 ? 3 : strength > 25 ? 2 : 1;
+
+    for (int i = 0; i < 4; i++) {
+        int height = 4 + i * 3;
+
+        gui_fill(c, x + i * 4 - ox, y + 13 - height - oy, 3, height, i < lit ? TASKBAR_TEXT : TASKBAR_LINE);
+    }
+}
+
+static void draw_field(struct gui_canvas *c, int field, const char *placeholder, int ox, int oy) {
+    struct rect f = wifi_field(field);
+    const char *text = field == FIELD_NAME ? wifi_name : wifi_password;
+    char shown[SSID_MAX + 64];
+    size_t length = strlen(text);
+
+    if (field == FIELD_PASSWORD) { // as dots
+        length = length < sizeof(shown) - 1 ? length : sizeof(shown) - 1;
+        memset(shown, '*', length);
+        shown[length] = '\0';
+    } else {
+        snprintf(shown, sizeof(shown), "%s", text);
+    }
+    gui_fill_rounded(c, f.x - ox, f.y - oy, f.width, f.height, SMALL_RADIUS, wifi_typing == field ? TITLE_FOCUSED : TASKBAR_BUTTON);
+    gui_fill_rounded(c, f.x + 1 - ox, f.y + 1 - oy, f.width - 2, f.height - 2, SMALL_RADIUS, TASKBAR_COLOR);
+
+    int fits = (int)gui_text_fit(shown, strlen(shown), f.width - 16), from = (int)strlen(shown) - fits;
+    int text_y = f.y + (f.height - GUI_CHAR_HEIGHT) / 2 - oy;
+
+    if (shown[0])
+        gui_text(c, f.x + 8 - ox, text_y, shown + from, TASKBAR_TEXT, 1);
+    else
+        gui_text(c, f.x + 8 - ox, text_y, placeholder, TASKBAR_DIM_TEXT, 1);
+    if (wifi_typing == field) // where what's typed goes
+        gui_fill(c, f.x + 8 + (shown[0] ? gui_text_width(shown + from, 1) : 0) - ox, text_y + 1, 1, GUI_CHAR_HEIGHT - 2,
+                 TASKBAR_TEXT);
+}
+
+static void draw_button(struct gui_canvas *c, struct rect b, const char *label, bool main, int ox, int oy) {
+    bool hovered = contains(b, cursor_x, cursor_y);
+
+    gui_fill_rounded(c, b.x - ox, b.y - oy, b.width, b.height, SMALL_RADIUS,
+                     main ? TITLE_FOCUSED : hovered ? TASKBAR_LINE : TASKBAR_BUTTON);
+    gui_text(c, b.x + (b.width - gui_text_width(label, 1)) / 2 - ox, b.y + (b.height - GUI_CHAR_HEIGHT) / 2 - oy, label,
+             main ? ON_ACCENT : TASKBAR_TEXT, 1);
+}
+
+static void draw_wifi_row(struct gui_canvas *c, int i, int ox, int oy) {
+    struct rect r = wifi_row(i);
+    const struct wifi *w = &net->wifi[i];
+    const struct gui_image *lock = w->secured ? gui_icon("lock") : NULL;
+    const char *state = !strcmp(net->joining, w->ssid) ? "Joining..." : w->active ? "Connected" : w->saved ? "Saved"
+                      : w->secured ? "Secured" : "Open";
+    char name[SSID_MAX];
+
+    if (wifi_open_index() == i || contains(r, cursor_x, cursor_y))
+        gui_fill_rounded(c, r.x - ox, r.y - oy, r.width, r.height, SMALL_RADIUS, TASKBAR_BUTTON);
+    draw_bars(c, r.x + 10, r.y + 11, w->strength, ox, oy);
+    snprintf(name, sizeof(name), "%.*s", (int)gui_text_fit(w->ssid, strlen(w->ssid), r.width - 80), w->ssid);
+    gui_text(c, r.x + 34 - ox, r.y + 2 - oy, name, TASKBAR_TEXT, 1);
+    gui_text(c, r.x + 34 - ox, r.y + 2 + GUI_CHAR_HEIGHT - oy, state, w->active ? TITLE_FOCUSED : TASKBAR_DIM_TEXT, 1);
+    if (lock)
+        gui_draw_image(c, r.x + r.width - 8 - ICON_SIZE - ox, r.y + (r.height - ICON_SIZE) / 2 - oy, lock);
+}
+
+static void draw_network_panel(struct gui_canvas *c, struct rect p, int ox, int oy) {
+    struct rect s = wifi_switch();
+    const char *note = wifi_note(), *labels[2];
+    int y = p.y + 40, open = wifi_open_index();
+
+    report_wifi();
+    gui_text(c, p.x + 12 - ox, p.y + 12 - oy, "Wi-Fi", TASKBAR_TEXT, 1);
+    gui_fill_rounded(c, s.x - ox, s.y - oy, s.width, s.height, s.height / 2, net->wifi_on ? TITLE_FOCUSED : TASKBAR_BUTTON);
+    gui_fill_rounded(c, s.x + (net->wifi_on ? s.width - s.height : 0) + 2 - ox, s.y + 2 - oy, s.height - 4, s.height - 4,
+                     (s.height - 4) / 2, 0xFFFFFF);
+    if (net->cable) {
+        const char *state = net->wired ? "Connected" : "Not connected";
+
+        gui_text(c, p.x + 12 - ox, y - oy, "Wired", TASKBAR_TEXT, 1);
+        gui_text(c, p.x + 12 + gui_text_width("Wired ", 1) - ox, y - oy, net->wired_name, TASKBAR_DIM_TEXT, 1);
+        gui_text(c, p.x + p.width - 12 - gui_text_width(state, 1) - ox, y - oy, state,
+                 net->wired ? TASKBAR_TEXT : TASKBAR_DIM_TEXT, 1);
+        y += wired_height();
+    }
+    if (note)
+        gui_text(c, p.x + 12 - ox, y - oy, note, TASKBAR_DIM_TEXT, 1);
+    for (int i = 0; i < wifi_shown(); i++)
+        draw_wifi_row(c, i, ox, oy);
+    if (wifi_listed()) {
+        struct rect h = wifi_row(wifi_shown());
+
+        if (hidden_opened || contains(h, cursor_x, cursor_y))
+            gui_fill_rounded(c, h.x - ox, h.y - oy, h.width, h.height, SMALL_RADIUS, TASKBAR_BUTTON);
+        gui_text(c, h.x + 34 - ox, h.y + (h.height - GUI_CHAR_HEIGHT) / 2 - oy, "Hidden network...", TASKBAR_TEXT, 1);
+    }
+    if (open >= 0) {
+        if (hidden_opened)
+            draw_field(c, FIELD_NAME, "Network name", ox, oy);
+        if (wifi_needs_password())
+            draw_field(c, FIELD_PASSWORD, hidden_opened ? "Password, if it has one" : "Password", ox, oy);
+        wifi_buttons(labels);
+        for (int i = 0; i < 2 && labels[i]; i++)
+            draw_button(c, wifi_button(i), labels[i], !strcmp(labels[i], "Connect"), ox, oy);
+    }
+    if (wifi_message[0]) {
+        char shown[sizeof(wifi_message)];
+
+        snprintf(shown, sizeof(shown), "%.*s", (int)gui_text_fit(wifi_message, strlen(wifi_message), p.width - 24),
+                 wifi_message);
+        gui_text(c, p.x + 12 - ox, p.y + p.height - 6 - PANEL_LINE - oy, shown, TASKBAR_DIM_TEXT, 1);
+    }
+}
+
+// What NetworkManager's said, after poll: the tray, and what joining came to.
+static void network_changed(const char *was_joining, int joined) {
+    check_network();
+    if (joined > 0) {
+        snprintf(wifi_message, sizeof(wifi_message), "Joined %s", was_joining);
+        printf("wm: joined %s\n", was_joining);
+    } else if (joined < 0) {
+        snprintf(wifi_message, sizeof(wifi_message), "%s", network_error());
+        printf("wm: couldn't join %s: %s\n", was_joining, network_error());
+    }
+    if (panel == TRAY_NETWORK) {
+        damage_network_panel();
+        report_wifi();
+    }
 }
 
 static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
@@ -1884,7 +2323,7 @@ static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
 }
 
 static bool tile_on(int tile) {
-    return tile == TILE_AIRPLANE ? net.airplane : tile == TILE_NIGHT ? settings.night_light
+    return tile == TILE_AIRPLANE ? net->running && !net->wifi_on : tile == TILE_NIGHT ? settings.night_light
          : tile == TILE_QUIET ? settings.quiet : !settings.light;
 }
 
@@ -2072,14 +2511,17 @@ static void draw_open_panel(struct gui_canvas *c, int unused, int ox, int oy) {
         draw_history(c, p, ox, oy);
     else if (panel == TRAY_CLIPS)
         draw_clips(c, p, ox, oy);
+    else if (panel == TRAY_NETWORK)
+        draw_network_panel(c, p, ox, oy);
     else
         draw_calendar(c, p, ox, oy);
 }
 
 static void draw_tray(struct gui_canvas *c, int ox, int oy) {
     struct rect q = tray_item(TRAY_QUICK), b = tray_item(TRAY_NOTICES), k = tray_item(TRAY_CLIPS);
-    const struct gui_image *clip = gui_icon("clipboard");
-    const struct gui_image *network = gui_icon(net.airplane ? "airplane" : connected() ? "network" : "offline");
+    struct rect n = tray_item(TRAY_NETWORK);
+    const struct gui_image *clip = gui_icon("clipboard"), *theme_icon = gui_icon("theme");
+    const struct gui_image *network = gui_icon(connected() ? "network" : net->running && !net->wifi_on ? "airplane" : "offline");
     const struct gui_image *speaker = gui_icon(muted || !volume ? "muted" : "speaker"), *bell = gui_icon("bell");
     int icon_y = q.y + (q.height - ICON_SIZE) / 2;
 
@@ -2097,7 +2539,9 @@ static void draw_tray(struct gui_canvas *c, int ox, int oy) {
         gui_text(c, q.x + 24 - ox, q.y + (q.height - GUI_CHAR_HEIGHT) / 2 - oy, percent, TASKBAR_TEXT, 1);
     }
     if (network)
-        gui_draw_image(c, q.x + 4 + (battery >= 0 ? BATTERY_WIDTH : 0) - ox, icon_y - oy, network);
+        gui_draw_image(c, n.x + (n.width - ICON_SIZE) / 2 - ox, icon_y - oy, network);
+    if (theme_icon && battery < 0 && mixer < 0)
+        gui_draw_image(c, q.x + (q.width - ICON_SIZE) / 2 - ox, icon_y - oy, theme_icon);
     if (speaker && mixer >= 0)
         gui_draw_image(c, q.x + q.width - 4 - ICON_SIZE - ox, icon_y - oy, speaker);
     if (bell)
@@ -2168,9 +2612,9 @@ static void use_clip(int index) {
 
 // A tile in quick settings turns what it's for on or off.
 static void toggle_tile(int tile) {
-    if (tile == TILE_AIRPLANE) { // netd's, for the whole computer
-        if (net_airplane(!net.airplane) == 0)
-            printf("wm: airplane %s\n", net.airplane ? "off" : "on");
+    if (tile == TILE_AIRPLANE) { // NetworkManager's, turning every radio off
+        if (network_set_wifi(!net->wifi_on))
+            printf("wm: airplane %s\n", net->wifi_on ? "on" : "off");
         check_network();
     } else if (tile == TILE_NIGHT) {
         settings.night_light = !settings.night_light;
@@ -2189,6 +2633,10 @@ static void toggle_tile(int tile) {
 static bool panel_click(void) {
     if (!contains(panel_rect(panel), cursor_x, cursor_y))
         return false;
+    if (panel == TRAY_NETWORK) {
+        network_click();
+        return true;
+    }
     for (int i = 0; panel == TRAY_QUICK && i < TILES; i++) {
         if (contains(quick_tile(i), cursor_x, cursor_y))
             toggle_tile(i);
@@ -5295,6 +5743,8 @@ static void handle_key(const struct key_event *e) {
         overview_key(e);
         return;
     }
+    if (wifi_key(e))
+        return;
     if (panel >= 0 && e->code == KEY_ESCAPE) {
         if (e->pressed)
             close_panel();
@@ -5545,6 +5995,7 @@ int main(int argc, char **argv) {
                             "start once someone's logged in. Super+L locks it again.\n"
                             "It runs on the screen itself, or in a window when started on another desktop.\n");
     display = &wm_server;
+    net = network_now();
     setvbuf(stdout, NULL, _IOLBF, 0); // as the tests read it
     login_mode = argc > 1 && !strcmp(argv[1], "--login");
     commands = argv + 1 + login_mode;
@@ -5594,13 +6045,17 @@ int main(int argc, char **argv) {
     int64_t net_checked = now_ms();
 
     snprintf(shown_clock, sizeof(shown_clock), "%s", clock_text(clock));
-    check_network();
+    if (!network_open())
+        printf("wm: no D-Bus, so no network\n");
     find_backlight();
     check_battery();
+    report_tray();
     while (!quitting) {
-        struct pollfd fds[1 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
-        struct pollfd *input = fds + 1;
-        int fd_count = 1 + display->poll_fds(input);
+        struct pollfd fds[2 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
+        struct pollfd *input = fds + 2;
+        int network_wait, fd_count = 2 + display->poll_fds(input);
+
+        network_poll(&fds[1], &network_wait);
 
         int preview = check_preview(); // before the flyouts, so their own start moving
         int layout_wait = check_layouts();
@@ -5640,6 +6095,7 @@ int main(int argc, char **argv) {
         }
 
         timeout = display->max_wait >= 0 && (timeout < 0 || timeout > display->max_wait) ? display->max_wait : timeout;
+        timeout = network_wait >= 0 && (timeout < 0 || network_wait < timeout) ? network_wait : timeout;
 
         int ready = poll(fds, fd_count, timeout);
 
@@ -5650,7 +6106,6 @@ int main(int argc, char **argv) {
             damage_taskbar();
         }
         if (now_ms() >= net_checked + NET_CHECK_MS) {
-            check_network();
             check_battery();
             load_desktop(false);
             load_volume(); // unless it's watched already
@@ -5659,6 +6114,13 @@ int main(int argc, char **argv) {
 
         if (fds[0].revents)
             mixer_changed();
+
+        char was_joining[SSID_MAX];
+        int joined;
+
+        snprintf(was_joining, sizeof(was_joining), "%s", net->joining);
+        if (network_read(&joined))
+            network_changed(was_joining, joined);
 
         if (display->read(input, &output, &(struct input){handle_mouse, handle_key, quit}))
             fit_screen();

@@ -49,8 +49,8 @@ package_aximos-apps() {
 
 package_aximos-desktop() {
     pkgdesc='AximOS desktop: wm, a Wayland compositor on wlroots, with XWayland, and its log-in screen'
-    depends=(aximos-libgui aximos-apps wlroots0.20 libinput pixman libdrm pam xorg-xwayland pipewire-pulse)
-    optdepends=('greetd: to log in with wm'"'"'s own log-in screen')
+    depends=(aximos-libgui aximos-apps wlroots0.20 libinput pixman libdrm pam systemd-libs xorg-xwayland pipewire-pulse)
+    optdepends=('greetd: to log in with wm'"'"'s own log-in screen' 'networkmanager: for the network panel')
     backup=(etc/pam.d/aximos-lock)
     _install_all
     _take usr/bin/wm usr/lib/aximos/login usr/share/aximos/wallpapers usr/share/wayland-sessions \

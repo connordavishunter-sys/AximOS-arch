@@ -199,6 +199,16 @@ class VM:
         self.proc.wait()
 
 
+def center_of(log, pattern):
+    """The middle of the last rectangle wm said was at a place matching pattern, as
+    "wm: <pattern> at x y width height", or None."""
+    found = re.findall(rf'wm: {pattern} at (\d+) (\d+) (\d+) (\d+)', log)
+    if not found:
+        return None
+    x, y, w, h = map(int, found[-1])
+    return x + w // 2, y + h // 2
+
+
 def window_of(log, app):
     """The size wm said an app's window opened at, or None."""
     found = re.findall(rf'wm: {re.escape(app)} opened a window, (\d+)x(\d+)', log)

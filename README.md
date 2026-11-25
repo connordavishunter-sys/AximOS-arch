@@ -15,10 +15,14 @@ Phase one: wm on wlroots, libgui's apps as Wayland clients, Wayland and X apps i
 windows, PipeWire for sound, greetd with wm's own log-in screen, pacman packages, and a
 live ISO that boots straight into the desktop, tested in QEMU.
 
-Still to come: Settings and the tray as front ends for NetworkManager, UPower and
-timedated; an installer; dragging files between wm's desktop and apps; screens beyond
-the first; and drawing at the screen's own resolution at 2x, which apps' HiDPI buffers
-are scaled down from for now.
+Phase two, under way: the tray's network icon opens a Wi-Fi panel, on NetworkManager,
+listing the networks nearby and the cable, joining open, secured and hidden networks,
+leaving and forgetting them, and turning Wi-Fi off, as airplane mode does too.
+
+Still to come: Settings as a front end for NetworkManager, UPower and timedated; the
+brightness keys and slider, which don't work on the laptop yet; an installer; dragging
+files between wm's desktop and apps; screens beyond the first; and drawing at the
+screen's own resolution at 2x, which apps' HiDPI buffers are scaled down from for now.
 
 ## How it fits together
 
@@ -37,6 +41,9 @@ are scaled down from for now.
   changing, and the log-in screen unlocking.
 - **libaudio** (`user/libaudio`) plays through PipeWire, as PulseAudio, which
   pipewire-pulse serves, and reads and writes sound files with Arch's codec libraries.
+- **The network** (`user/wm/network.c`) is NetworkManager's, over D-Bus with sd-bus, on
+  wm's own poll loop. Networks joined from the panel belong to whoever's logged in, as
+  NetworkManager lets them make those without an admin's password.
 - **Logging in**: greetd runs `wm --login`, whose log-in screen (`user/login`) logs in
   through greetd's socket. The lock screen checks the password with PAM.
 
@@ -68,4 +75,5 @@ with no screen at all. `kill -USR1` saves what it's showing to
 It boots straight into the desktop as `aximos`, whose password, for the lock screen, is
 `aximos`. It has Arch's base and kernel, NetworkManager, PipeWire with WirePlumber,
 UPower, `nvidia-open` for NVIDIA's GPUs, `foot` and `xterm`. The serial port has a root
-shell, for the tests.
+shell, for the tests, and hostapd and dnsmasq, which the Wi-Fi test makes access points
+of simulated radios with.
