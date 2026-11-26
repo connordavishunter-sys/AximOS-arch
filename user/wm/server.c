@@ -69,6 +69,7 @@ struct surface {
     struct surface *parent; // a popup's
     uint32_t *pixels;       // its surfaces, put together, width by height, at scale
     int width, height, scale;
+    uint64_t layout; // where its surfaces are, and how big, as last gathered, hashed
     int x, y; // where an X window was last put, or a popup is relative to its parent's contents
     bool translucent;
     bool keys[MAX_KEYS];
@@ -306,7 +307,18 @@ static void copy_surface(struct wlr_surface *surface, int sx, int sy, void *data
         y1 = y1 < s->height ? y1 : s->height;
         x0 = x0 > 0 ? x0 : 0, y0 = y0 > 0 ? y0 : 0;
 
-        for (int y = y0 * k; y < y1 * k; y++) {
+        // A buffer at the display's own scale, as apps draw them, pixel for pixel.
+        bool same = src.x == (int)src.x && src.y == (int)src.y && src.width == width * k && src.height == height * k;
+
+        for (int y = y0 * k; same && !alpha && y < y1 * k; y++) {
+            const uint32_t *row = (const uint32_t *)((const uint8_t *)from + (size_t)((int)src.y + y - top * k) * stride)
+                                + (int)src.x - left * k;
+            uint32_t *to = s->pixels + (size_t)y * s->width * k;
+
+            for (int x = x0 * k; x < x1 * k; x++)
+                to[x] = row[x] & 0xFFFFFF;
+        }
+        for (int y = y0 * k; !(same && !alpha) && y < y1 * k; y++) {
             int by = (int)(buffer_at(src.y, src.height, height * k, y - top * k) >> 16);
             const uint32_t *row = (const uint32_t *)((const uint8_t *)from
                                                      + (size_t)(by < buffer->height ? by : buffer->height - 1) * stride);
@@ -341,14 +353,37 @@ static struct wlr_box geometry_of(const struct surface *s) {
     return (struct wlr_box){0}; // an X window is all its surface
 }
 
-// Gives wm what changed, after a commit to any of the window's surfaces.
+// Where a window's surfaces are and how big, hashed, and where one of them is.
+struct layout {
+    struct wlr_surface *find;
+    int x, y;
+    bool found;
+    uint64_t hash;
+};
+
+static void lay_out(struct wlr_surface *surface, int sx, int sy, void *data) {
+    struct layout *l = data;
+    uint64_t parts[] = {(uintptr_t)surface, (uint64_t)(uint32_t)sx, (uint64_t)(uint32_t)sy,
+                        (uint64_t)surface->current.width << 32 | (uint32_t)surface->current.height};
+
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++)
+        l->hash = (l->hash ^ parts[i]) * 0x100000001B3ULL;
+    if (surface == l->find)
+        l->x = sx, l->y = sy, l->found = true;
+}
+
+// Gives wm what changed, after a commit to any of the window's surfaces: only what
+// that surface says changed, where it is in the window, unless the window's size, or
+// where its surfaces are, changed, when it's all of it.
 static void gather(struct surface *s, struct wlr_surface *committed) {
     struct wlr_box g = geometry_of(s);
     int width = g.width > 0 ? g.width : s->surface->current.width, height = g.height > 0 ? g.height : s->surface->current.height;
     struct gather into = {s, {0, 0, width, height}, g.x, g.y};
+    struct layout l = {.find = committed, .hash = 0xCBF29CE484222325ULL};
 
     if (width <= 0 || height <= 0)
         return;
+    wlr_surface_for_each_surface(s->surface, lay_out, &l);
     if (width != s->width || height != s->height || s->scale != server.scale) {
         uint32_t *pixels = calloc((size_t)width * height * server.scale * server.scale, sizeof(uint32_t));
 
@@ -356,9 +391,7 @@ static void gather(struct surface *s, struct wlr_surface *committed) {
             return;
         free(s->pixels);
         s->pixels = pixels, s->width = width, s->height = height, s->scale = server.scale;
-    } else if (committed == s->surface && wl_list_empty(&s->surface->current.subsurfaces_above)
-               && wl_list_empty(&s->surface->current.subsurfaces_below)) {
-        // With no other surfaces, only what the app says it changed.
+    } else if (committed && l.found && l.hash == s->layout) {
         pixman_box32_t *b = pixman_region32_extents(&committed->buffer_damage);
         struct wlr_fbox src;
         double across, down;
@@ -366,9 +399,14 @@ static void gather(struct surface *s, struct wlr_surface *committed) {
         wlr_surface_get_buffer_source_box(committed, &src);
         across = src.width > 0 ? committed->current.width / src.width : 1;
         down = src.height > 0 ? committed->current.height / src.height : 1;
-        into.box = (pixman_box32_t){(int)floor((b->x1 - src.x) * across) - g.x, (int)floor((b->y1 - src.y) * down) - g.y,
-                                    (int)ceil((b->x2 - src.x) * across) - g.x, (int)ceil((b->y2 - src.y) * down) - g.y};
+        into.box = (pixman_box32_t){(int)floor((b->x1 - src.x) * across) + l.x - g.x,
+                                    (int)floor((b->y1 - src.y) * down) + l.y - g.y,
+                                    (int)ceil((b->x2 - src.x) * across) + l.x - g.x,
+                                    (int)ceil((b->y2 - src.y) * down) + l.y - g.y};
     }
+    s->layout = l.hash;
+    into.box.x1 = into.box.x1 > 0 ? into.box.x1 : 0, into.box.y1 = into.box.y1 > 0 ? into.box.y1 : 0;
+    into.box.x2 = into.box.x2 < width ? into.box.x2 : width, into.box.y2 = into.box.y2 < height ? into.box.y2 : height;
     if (into.box.x2 <= into.box.x1 || into.box.y2 <= into.box.y1)
         return;
     wlr_surface_for_each_surface(s->surface, copy_surface, &into);
@@ -454,7 +492,7 @@ static void on_subsurface_commit(struct wl_listener *l, void *data) {
 
     (void)data;
     if (s && s->surface != sub->surface) {
-        gather(s, NULL);
+        gather(s, sub->surface);
         if (server.output)
             wlr_output_schedule_frame(server.output);
     }
@@ -845,13 +883,22 @@ static bool opened(const struct surface *popup, const struct surface *s) {
     return false;
 }
 
+// Destroying a popup frees it, and the popups it opened, which may be any of the
+// list's, so after each the list's looked through again.
 static void dismiss_popups(const struct surface *pressed) {
     struct surface *s;
+    bool dismissed;
 
-    wl_list_for_each(s, &server.surfaces, link) {
-        if (s->popup && s->window && !opened(s, pressed))
-            wlr_xdg_popup_destroy(s->popup);
-    }
+    do {
+        dismissed = false;
+        wl_list_for_each(s, &server.surfaces, link) {
+            if (s->popup && s->window && !opened(s, pressed)) {
+                wlr_xdg_popup_destroy(s->popup);
+                dismissed = true;
+                break;
+            }
+        }
+    } while (dismissed);
 }
 
 static void mouse(struct surface *s, const struct gui_message *m) {
