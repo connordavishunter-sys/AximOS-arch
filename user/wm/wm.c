@@ -6502,6 +6502,70 @@ static void dump_screen(void) {
     printf(gui_image_save(path, &screen) ? "wm: saved the screen to %s\n" : "wm: can't save the screen to %s\n", path);
 }
 
+// Updates: checkupdates says what's waiting, Arch's and AximOS's, a few minutes
+// after logging in, then each day, and on SIGUSR2, for the tests. When there are
+// some, and more than were said last, a notice says so, which opens Settings' Updates.
+#define UPDATE_FIRST_MS (5 * 60 * 1000)
+#define UPDATE_EVERY_MS (24 * 60 * 60 * 1000)
+static int64_t update_due = -1;
+static int update_fd = -1, updates_told;
+static char update_said[16384];
+static size_t update_said_length;
+static volatile sig_atomic_t update_asked;
+
+static void ask_updates(int signal) {
+    (void)signal;
+    update_asked = 1;
+}
+
+static void check_updates(void) {
+    int out[2];
+    pid_t child;
+
+    update_asked = 0;
+    update_due = now_ms() + UPDATE_EVERY_MS;
+    if (update_fd >= 0 || pipe2(out, O_CLOEXEC) < 0)
+        return;
+    if ((child = fork()) == 0) {
+        dup2(out[1], STDOUT_FILENO);
+        execlp("checkupdates", "checkupdates", (char *)NULL);
+        _exit(127);
+    }
+    close(out[1]);
+    if (child < 0) {
+        close(out[0]);
+        return;
+    }
+    update_fd = out[0];
+    update_said_length = 0;
+    fcntl(update_fd, F_SETFL, O_NONBLOCK);
+    printf("wm: looking for updates\n");
+}
+
+static void read_updates(void) {
+    ssize_t n;
+    int count = 0;
+
+    while ((n = read(update_fd, update_said + update_said_length, sizeof(update_said) - 1 - update_said_length)) > 0)
+        update_said_length += n;
+    if (n < 0 && errno == EAGAIN)
+        return;
+    close(update_fd);
+    update_fd = -1;
+    update_said[update_said_length] = '\0';
+    for (const char *at = update_said; (at = strstr(at, " -> ")); at += 4)
+        count++;
+    printf("wm: %d updates\n", count);
+    if (count > updates_told) {
+        struct notice *n = add_notice(count == 1 ? "An update is ready" : "Updates are ready", "Settings can install them", "settings");
+
+        if (n)
+            notice_action(n, "Open", GUI_APPS "/System/settings Updates");
+        printf("wm: told of %d updates\n", count);
+    }
+    updates_told = count;
+}
+
 static int fail(const char *what) {
     dprintf(STDERR_FILENO, "wm: %s: %s\n", what, strerror(errno));
     return 1;
@@ -6521,6 +6585,7 @@ int main(int argc, char **argv) {
     command_count = argc - 1 - login_mode;
     signal(SIGPIPE, SIG_IGN);
     sigaction(SIGUSR1, &(struct sigaction){.sa_handler = ask_dump}, NULL);
+    sigaction(SIGUSR2, &(struct sigaction){.sa_handler = ask_updates}, NULL);
 
     if (!display->open(&output))
         return 1;
@@ -6572,9 +6637,15 @@ int main(int argc, char **argv) {
     check_battery();
     report_tray();
     while (!quitting) {
-        struct pollfd fds[4 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
-        struct pollfd *input = fds + 4;
-        int network_wait, polkit_wait, fd_count = 4 + display->poll_fds(input);
+        struct pollfd fds[5 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
+        struct pollfd *input = fds + 5;
+        int network_wait, polkit_wait, fd_count = 5 + display->poll_fds(input);
+
+        fds[4] = (struct pollfd){.fd = update_fd, .events = POLLIN};
+        if (update_due < 0 && logged_in && !login_mode)
+            update_due = now_ms() + UPDATE_FIRST_MS;
+        if (update_asked || (update_due >= 0 && now_ms() >= update_due))
+            check_updates();
 
         network_poll(&fds[1], &network_wait);
         polkit_poll(&fds[2], &polkit_wait);
@@ -6620,6 +6691,11 @@ int main(int argc, char **argv) {
         timeout = display->max_wait >= 0 && (timeout < 0 || timeout > display->max_wait) ? display->max_wait : timeout;
         timeout = network_wait >= 0 && (timeout < 0 || network_wait < timeout) ? network_wait : timeout;
         timeout = polkit_wait >= 0 && (timeout < 0 || polkit_wait < timeout) ? polkit_wait : timeout;
+        if (update_due >= 0) {
+            int64_t wait = update_due - now_ms();
+
+            timeout = timeout < 0 || wait < timeout ? (wait > 0 ? (int)wait : 0) : timeout;
+        }
 
         int ready = poll(fds, fd_count, timeout);
 
@@ -6647,6 +6723,8 @@ int main(int argc, char **argv) {
             network_changed(was_joining, joined);
         if (polkit_read())
             auth_changed();
+        if (update_fd >= 0 && fds[4].revents)
+            read_updates();
 
         if (display->read(input, &output, &(struct input){handle_mouse, handle_key, quit}))
             fit_screen();

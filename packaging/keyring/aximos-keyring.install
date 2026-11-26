@@ -1,0 +1,10 @@
+# pacman trusts AximOS's key, for its repository, once it's installed.
+post_install() {
+    if [ -d /etc/pacman.d/gnupg ]; then
+        pacman-key --populate aximos
+    fi
+}
+
+post_upgrade() {
+    post_install
+}

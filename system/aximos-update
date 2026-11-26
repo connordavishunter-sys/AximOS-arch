@@ -1,0 +1,22 @@
+#!/bin/bash
+# Updates AximOS, Arch's packages and AximOS's own, as root. Settings runs it with
+# pkexec, so wm asks for an admin's password, and shows what it says as it goes:
+# the keyrings first, so packages signed with new keys are trusted, then the rest.
+set -o pipefail
+
+say() { echo "aximos-update: $*"; }
+
+[[ $EUID == 0 ]] || { say "it needs to be run as root"; exit 1; }
+say "looking at the repositories"
+pacman -Sy --noconfirm 2>&1 || { say "couldn't reach the repositories"; exit 1; }
+keyrings=()
+for keyring in archlinux-keyring aximos-keyring; do
+    pacman -Si "$keyring" >/dev/null 2>&1 && keyrings+=("$keyring")
+done
+if (( ${#keyrings[@]} )); then
+    say "updating the keyrings"
+    pacman -S --needed --noconfirm "${keyrings[@]}" 2>&1 || { say "the keyrings couldn't be updated"; exit 1; }
+fi
+say "updating everything else"
+pacman -Su --noconfirm 2>&1 || { say "the update didn't finish"; exit 1; }
+say "done"

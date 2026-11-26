@@ -36,7 +36,10 @@ ttf-dejavu
 aximos-installer
 base-devel
 git
-# AximOS
+# AximOS, and its key, which its packages are signed with, and checkupdates, which
+# says what updates there are
+aximos-keyring
+pacman-contrib
 aximos-libgui
 aximos-apps
 aximos-desktop

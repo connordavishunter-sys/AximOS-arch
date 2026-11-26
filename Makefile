@@ -64,7 +64,7 @@ WM := $(BUILD)/bin/wm
 APP_PATHS := $(APPS:%=$(BUILD)/apps/%)
 TOOL_PATHS := $(GUI_TOOLS:%=$(BUILD)/bin/%) $(LIBEXEC_TOOLS:%=$(BUILD)/libexec/%)
 
-.PHONY: all install iso packages test clean help
+.PHONY: all install iso packages publish test clean help
 .SECONDEXPANSION:
 
 all: $(WM) $(APP_PATHS) $(TOOL_PATHS) $(CODEC_PATHS)
@@ -130,6 +130,8 @@ install: all
 	ln -sf /usr/share/fonts/TTF/DejaVuSans.ttf /usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf $(DESTDIR)$(PREFIX)/share/aximos/fonts/
 	install -Dm644 -t $(DESTDIR)$(PREFIX)/include/aximos user/libgui/include/gui.h abi/key_event.h abi/mouse_event.h
 	install -Dm755 system/aximos-install $(DESTDIR)$(PREFIX)/bin/aximos-install
+	install -Dm755 system/aximos-update $(DESTDIR)$(PREFIX)/bin/aximos-update
+	install -Dm644 system/org.aximos.update.policy $(DESTDIR)$(PREFIX)/share/polkit-1/actions/org.aximos.update.policy
 	install -Dm644 system/aximos.desktop $(DESTDIR)$(PREFIX)/share/wayland-sessions/aximos.desktop
 	install -Dm644 system/logind.conf $(DESTDIR)$(PREFIX)/lib/systemd/logind.conf.d/aximos.conf
 	install -Dm644 system/pam.d/aximos-lock $(DESTDIR)/etc/pam.d/aximos-lock
@@ -142,15 +144,40 @@ CHROOT := $(BUILD)/chroot
 REPO := $(BUILD)/repo
 PACKAGING := $(BUILD)/packaging
 PACKAGE_CACHE := $(abspath $(BUILD)/package-cache)
+# Each build's version comes from git, as how many commits there are and the last's
+# hash, so every build is newer than the one before. Packages and the repository's
+# database are signed with SIGNING_KEY, which installed systems trust.
+VERSION ?= 0.1.0.r$(shell git rev-list --count HEAD).g$(shell git rev-parse --short HEAD)
+SIGNING_KEY ?= D0EB0C9AA46C7C675C8306B1F344BF999C1E9042
 packages:
 	rm -rf $(PACKAGING) && mkdir -p $(PACKAGING) $(REPO) $(CHROOT) $(PACKAGE_CACHE)
-	cp packaging/PKGBUILD $(PACKAGING)/
+	sed 's/^pkgver=.*/pkgver=$(VERSION)/' packaging/PKGBUILD > $(PACKAGING)/PKGBUILD
+	cp packaging/keyring/aximos-keyring.install $(PACKAGING)/
+	tar -czf $(PACKAGING)/keyring.tar.gz -C packaging keyring
 	tar -czf $(PACKAGING)/aximos.tar.gz --transform 's,^\.,aximos,' --exclude=./build --exclude=./.git .
 	[ -d $(CHROOT)/root ] || sudo mkarchroot -C /usr/share/devtools/pacman.conf.d/extra.conf \
 		-M /usr/share/devtools/makepkg.conf.d/x86_64.conf -c $(PACKAGE_CACHE) $(CHROOT)/root base-devel
 	cd $(PACKAGING) && makechrootpkg -c -u -r $(abspath $(CHROOT))
+	rm -f $(REPO)/*.pkg.tar.zst $(REPO)/*.sig $(REPO)/aximos.*
 	cp $(PACKAGING)/*.pkg.tar.zst $(REPO)/
-	repo-add -q -R $(REPO)/aximos.db.tar.gz $(REPO)/*.pkg.tar.zst
+	for p in $(REPO)/*.pkg.tar.zst; do gpg --batch --yes -u $(SIGNING_KEY) --detach-sign "$$p"; done
+	repo-add -q -s -k $(SIGNING_KEY) $(REPO)/aximos.db.tar.gz $(REPO)/*.pkg.tar.zst
+
+# The packages, on AximOS-arch's packages release, where installed systems update
+# from: what's there is replaced by what make packages made. The database goes as
+# aximos.db, which is what pacman asks for, as a release can't hold a link.
+RELEASE := packages
+publish:
+	gh release view $(RELEASE) >/dev/null 2>&1 || gh release create $(RELEASE) --title "AximOS packages" \
+		--notes "The pacman repository installed AximOS systems update from." --latest=false
+	cp -L $(REPO)/aximos.db.tar.gz $(BUILD)/aximos.db && cp -L $(REPO)/aximos.db.tar.gz.sig $(BUILD)/aximos.db.sig
+	cp -L $(REPO)/aximos.files.tar.gz $(BUILD)/aximos.files && cp -L $(REPO)/aximos.files.tar.gz.sig $(BUILD)/aximos.files.sig
+	gh release view $(RELEASE) --json assets -q '.assets[].name' | grep -v -x -F \
+		-e aximos.db -e aximos.db.sig -e aximos.files -e aximos.files.sig \
+		$(foreach p,$(notdir $(wildcard $(REPO)/*.pkg.tar.zst)),-e $(p) -e $(p).sig) \
+		| xargs -r -n1 gh release delete-asset $(RELEASE) -y
+	gh release upload $(RELEASE) --clobber $(REPO)/*.pkg.tar.zst $(REPO)/*.pkg.tar.zst.sig \
+		$(BUILD)/aximos.db $(BUILD)/aximos.db.sig $(BUILD)/aximos.files $(BUILD)/aximos.files.sig
 
 # The live ISO, from iso/, with Arch's packages and AximOS's from the repository
 # make packages makes, built as root by mkarchiso.
@@ -162,6 +189,7 @@ $(ISO): $(shell find iso -type f) $(wildcard $(REPO)/*.pkg.tar.zst)
 	rm -rf $(ISO_PROFILE) && cp -r iso $(ISO_PROFILE) && rm $(ISO_PROFILE)/pacman.conf.in
 	sed 's|@REPO@|$(abspath $(REPO))|; s|@CACHE@|$(PACKAGE_CACHE)|' iso/pacman.conf.in > $(ISO_PROFILE)/pacman.conf
 	sudo rm -rf $(ISO_WORK)
+	rm -f $(PACKAGE_CACHE)/aximos-* # always from the repository, as a rebuild can keep its version
 	sudo mkarchiso -w $(ISO_WORK) -o $(abspath $(BUILD))/iso-out $(ISO_PROFILE)
 	sudo rm -rf $(ISO_WORK)
 	sudo chown -R $(shell id -u):$(shell id -g) $(BUILD)/iso-out

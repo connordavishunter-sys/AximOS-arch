@@ -4,61 +4,9 @@ can be cancelled. Settings' Network, Power, Date & time and About pages, and the
 lid's setting. Then the menus: a taskbar button's, the desktop's New folder, New
 file and Settings, and renaming in place on the desktop and in Files."""
 import re, time
-from vm import VM, USER, center_of, check, finish
+from vm import VM, USER, button_of, check, finish, mark, said, start, wait_for, widget, window_at
 
 PASSWORD = 'aximos'  # the live account's
-
-
-def wait_for(vm, needle, secs=30, since=0):
-    end = time.time() + secs
-    while time.time() < end:
-        log = vm.wm_log()
-        if needle in log[since:]:
-            return log
-        time.sleep(1)
-    return None
-
-
-def mark(vm):
-    return len(vm.wm_log())
-
-
-def start(vm, app, command):
-    """Starts an app, keeping what it says in /tmp/app.log."""
-    vm.run(f'rm -f /tmp/{app}.log')
-    vm.as_user(f'{command} > /tmp/{app}.log 2>&1')
-
-
-def said(vm, app, needle, secs=30):
-    """What an app's said, once it's said needle, or None."""
-    end = time.time() + secs
-    while time.time() < end:
-        log = vm.run(f'cat /tmp/{app}.log 2>/dev/null', 10)
-        if needle in log:
-            return log
-        time.sleep(1)
-    return None
-
-
-def window_at(log, app):
-    found = re.findall(rf'wm: {re.escape(app)} opened a window, (\d+)x(\d+) at (-?\d+) (-?\d+)', log)
-    return tuple(map(int, found[-1])) if found else None
-
-
-def widget(vm, log, app, what):
-    """The middle of a widget an app said it had drawn, on the screen."""
-    w, h, x, y = window_at(vm.wm_log(), app)
-    found = re.findall(rf'{app}: at {re.escape(what)} (\d+) (\d+) (\d+) (\d+)', log)
-    if not found:
-        return None
-    wx, wy, ww, wh = map(int, found[-1])
-    return x + wx + ww // 2, y + wy + wh // 2
-
-
-def button_of(log, title):
-    found = re.findall(rf'wm: taskbar button \d+ at (\d+) (\d+) (\d+) (\d+), {re.escape(title)}', log)
-    x, y, w, h = map(int, found[-1])
-    return x + w // 2, y + h // 2
 
 
 vm = VM()

@@ -28,9 +28,11 @@ front end: its Network, Power, Date & time and About pages are NetworkManager's,
 UPower's and power-profiles-daemon's, timedated's and hostnamed's, and wm asks for an
 admin's password, as polkit's agent, when a change needs one. Taskbar buttons have a
 menu, the desktop's makes new folders and files and opens Settings, and things are
-renamed where their names are, on the desktop and in Files.
+renamed where their names are, on the desktop and in Files. Installed systems update
+from AximOS's own signed repository and Arch's, from Settings' Updates page, which wm
+tells of each day.
 
-Still to come: updating an installed system; dragging
+Still to come: dragging
 files between wm's desktop and apps; and screens beyond the first.
 
 ## How it fits together
@@ -68,6 +70,13 @@ files between wm's desktop and apps; and screens beyond the first.
   unless they were asked for), and makes the account. Limine boots it, from AximOS's
   own boot partition, with a menu of every other system's EFI loader it finds, so a
   system beside it, such as CachyOS, stays in the menu.
+- **Updating**: `make packages` versions each build from git and signs the packages
+  and the repository's database with AximOS's key, whose public half is
+  `aximos-keyring`'s (`packaging/keyring`). `make publish` puts them on this
+  repository's `packages` release, which installed systems' `pacman.conf` has as
+  `[aximos]`, trusting only that key. Settings' Updates page lists what's waiting, with
+  `checkupdates`, and installs it with `aximos-update`, through `pkexec`, so wm asks for
+  the password; wm looks each day, and says when there are some.
 - **Logging in**: greetd runs `wm --login`, whose log-in screen (`user/login`) logs in
   through greetd's socket. The lock screen checks the password with PAM.
 

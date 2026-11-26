@@ -202,6 +202,10 @@ EOF
     echo "$hostname" >"$TARGET/etc/hostname"
     ln -sf "/usr/share/zoneinfo/$timezone" "$TARGET/etc/localtime"
     genfstab -U "$TARGET" >"$TARGET/etc/fstab"
+    # Its own keyring, trusting Arch's packagers and AximOS's key, for its updates.
+    rm -rf "$TARGET/etc/pacman.d/gnupg"
+    arch-chroot "$TARGET" pacman-key --init >/dev/null 2>&1
+    arch-chroot "$TARGET" pacman-key --populate >/dev/null 2>&1 || say "pacman's keyring couldn't be set up, so updates will need it"
     packages=("${LIVE_PACKAGES[@]}")
     $dev || packages+=("${DEV_PACKAGES[@]}")
     installed=$(arch-chroot "$TARGET" pacman -Qq "${packages[@]}" 2>/dev/null || true)

@@ -13,6 +13,8 @@ Include = /etc/pacman.d/mirrorlist
 [extra]
 Include = /etc/pacman.d/mirrorlist
 
+# The packages make packages just built, here, which the host's keyring needn't
+# know the key of.
 [aximos]
-SigLevel = Optional TrustAll
+SigLevel = Never
 Server = file://@REPO@

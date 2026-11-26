@@ -13,6 +13,7 @@
 #include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -25,9 +26,9 @@
 #define MAX_APPS 32
 #define TEST_SOUND GUI_SHARE "/example_music/1.wav"
 
-enum { NETWORK, APPEARANCE, DISPLAY, SOUND, POWER, KEYBOARD, TIME, APPS, TASKBAR, ABOUT, TABS };
-static const char *const tabs[] = {"Network", "Appearance", "Display", "Sound",   "Power",
-                                   "Keyboard", "Date & time", "Apps",   "Taskbar", "About"};
+enum { NETWORK, APPEARANCE, DISPLAY, SOUND, POWER, KEYBOARD, TIME, APPS, TASKBAR, UPDATES, ABOUT, TABS };
+static const char *const tabs[] = {"Network", "Appearance", "Display", "Sound",   "Power",  "Keyboard",
+                                   "Date & time", "Apps",   "Taskbar", "Updates", "About"};
 static const char *const kind_names[GUI_KINDS] = {"Folders", "Pictures", "Sounds", "Web pages", "Other files"};
 
 // The apps there are, to open each kind of file in.
@@ -666,6 +667,150 @@ static void about_page(struct gui_ui *ui) {
     gui_label(ui, "Disk: %s free of %s", bytes(about.disk_free, a), bytes(about.disk_total, b));
 }
 
+// Updates: what checkupdates says is waiting, Arch's and AximOS's, and installing
+// them with aximos-update, through pkexec, which has wm ask for an admin's password.
+// Each runs on its own, and what it says is read each second, without waiting.
+struct job {
+    pid_t pid; // or 0 when it's not running
+    int fd, status;
+    char said[8192];
+    size_t length;
+    bool done, reaped; // finished, and its status had, by job_read or the frame's reaping
+};
+static struct job checking, updating;
+static char update_lines[64][128];
+static const char *update_items[64];
+static int update_count, update_at = -1;
+
+static bool job_start(struct job *j, char *const argv[]) {
+    int out[2];
+
+    *j = (struct job){.fd = -1};
+    if (pipe2(out, O_CLOEXEC) < 0 || (j->pid = fork()) < 0)
+        return false;
+    if (j->pid == 0) {
+        dup2(out[1], 1);
+        dup2(out[1], 2);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(out[1]);
+    j->fd = out[0];
+    fcntl(j->fd, F_SETFL, O_NONBLOCK);
+    return true;
+}
+
+// Takes what it's said since, keeping the end, returning true once it's finished.
+static bool job_read(struct job *j) {
+    ssize_t n;
+
+    if (!j->pid || j->done)
+        return false;
+    while ((n = read(j->fd, j->said + j->length, sizeof(j->said) - 1 - j->length)) > 0) {
+        j->length += n;
+        if (j->length > sizeof(j->said) * 3 / 4) {
+            memmove(j->said, j->said + j->length - sizeof(j->said) / 2, sizeof(j->said) / 2);
+            j->length = sizeof(j->said) / 2;
+        }
+    }
+    j->said[j->length] = '\0';
+    if (n == 0 || (n < 0 && errno != EAGAIN)) {
+        close(j->fd);
+        if (!j->reaped && waitpid(j->pid, &j->status, 0) == j->pid)
+            j->status = WIFEXITED(j->status) ? WEXITSTATUS(j->status) : -1;
+        j->done = true;
+        return true;
+    }
+    return false;
+}
+
+// A child that's finished, which may be one of the jobs, whose status they keep.
+static void reaped(pid_t pid, int status) {
+    struct job *j = pid == checking.pid ? &checking : pid == updating.pid ? &updating : NULL;
+
+    if (j && !j->reaped)
+        j->status = WIFEXITED(status) ? WEXITSTATUS(status) : -1, j->reaped = true;
+}
+
+// The last line it said, but for an empty one at the end.
+static const char *last_line(const struct job *j) {
+    static char line[160];
+    const char *end = j->said + j->length;
+
+    while (end > j->said && end[-1] == '\n')
+        end--;
+    const char *start = end;
+
+    while (start > j->said && start[-1] != '\n')
+        start--;
+    snprintf(line, sizeof(line), "%.*s", (int)(end - start), start);
+    return line;
+}
+
+static void look_for_updates(void) {
+    if (checking.pid && !checking.done)
+        return;
+    update_count = 0;
+    job_start(&checking, (char *[]){"checkupdates", NULL});
+    printf("settings: looking for updates\n");
+}
+
+// checkupdates says each as "name old -> new", or nothing, and 2, when there are none.
+static void found_updates(void) {
+    char *line = strtok(checking.said, "\n");
+
+    for (update_count = 0; line && update_count < 64; line = strtok(NULL, "\n")) {
+        if (strstr(line, " -> ")) {
+            snprintf(update_lines[update_count], sizeof(update_lines[0]), "%s", line);
+            update_items[update_count] = update_lines[update_count];
+            update_count++;
+        }
+    }
+    if (checking.status == 1)
+        snprintf(status, sizeof(status), "Couldn't look for updates: %s", last_line(&checking));
+    printf("settings: %d updates\n", update_count);
+}
+
+static void updates_page(struct gui_ui *ui) {
+    bool installing = updating.pid && !updating.done;
+
+    if (installing) {
+        gui_label(ui, "Installing updates...");
+        gui_label(ui, "%s", last_line(&updating));
+        return;
+    }
+    if (gui_button(ui, "Look again"))
+        look_for_updates();
+    report(ui, 78, "look");
+    if (update_count) {
+        gui_same_line(ui);
+        if (gui_button(ui, "Update now")) {
+            status[0] = '\0';
+            job_start(&updating, (char *[]){"pkexec", "/usr/bin/aximos-update", NULL});
+            printf("settings: updating\n");
+        }
+        report(ui, 79, "update");
+    }
+    if (updating.done) {
+        snprintf(status, sizeof(status), updating.status == 0 ? "Updated. Some take effect once you log in again, or restart."
+                                       : updating.status == 126 || updating.status == 127
+                                           ? "Updating needs an admin's password."
+                                           : "The update didn't finish: %s", last_line(&updating));
+        printf("settings: updated: %s\n", status);
+        updating = (struct job){0};
+        look_for_updates();
+    }
+    gui_label(ui, "%s", status);
+    if (checking.pid && !checking.done)
+        gui_label(ui, "Looking for updates...");
+    else if (!update_count)
+        gui_label(ui, "AximOS is up to date.");
+    else {
+        gui_label(ui, update_count == 1 ? "1 update is ready:" : "%d updates are ready:", update_count);
+        gui_list(ui, "##updates", update_items, update_count, &update_at, 12);
+    }
+}
+
 // What a tab shows that's read as it's shown.
 static void read_system(void);
 
@@ -676,6 +821,8 @@ static void entered(void) {
         network_scan();
     if (tab == ABOUT)
         about_read(&about), snprintf(new_hostname, sizeof(new_hostname), "%s", about.hostname);
+    if (tab == UPDATES && !update_count && !(updating.pid && !updating.done))
+        look_for_updates();
     read_system();
 }
 
@@ -694,6 +841,9 @@ static void read_system(void) {
     }
     if (tab == TIME)
         clock_read(&clock_now);
+    if (job_read(&checking))
+        found_updates();
+    job_read(&updating);
 }
 
 static void date_and_time(struct gui_ui *ui) {
@@ -850,8 +1000,10 @@ static void keep_strip(struct gui_ui *ui) {
 static void frame(struct gui_ui *ui) {
     int was = tab;
 
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-        ; // a test sound that's finished
+    int status;
+
+    for (pid_t pid; (pid = waitpid(-1, &status, WNOHANG)) > 0;) // a test sound, or a job, that's finished
+        reaped(pid, status);
 
     gui_ui_begin(ui);
     gui_tabs(ui, tabs, TABS, &tab, NULL);
@@ -885,6 +1037,8 @@ static void frame(struct gui_ui *ui) {
         power_page(ui);
     else if (tab == ABOUT)
         about_page(ui);
+    else if (tab == UPDATES)
+        updates_page(ui);
     else
         date_and_time(ui);
     if (scrolls)
@@ -937,7 +1091,8 @@ int main(int argc, char **argv) {
             gui_settings_load(&settings);
         if (e.type == GUI_TIMER && e.x == keep_timer && keep_left && --keep_left == 0)
             go_back();
-        if (e.type == GUI_TIMER && e.x == every_second && (tab == NETWORK || tab == POWER || tab == TIME)) {
+        if (e.type == GUI_TIMER && e.x == every_second
+            && (tab == NETWORK || tab == POWER || tab == TIME || tab == UPDATES || updating.pid)) {
             read_system();
             frame(&ui);
         }
