@@ -29,6 +29,7 @@ void wm_window_cursor(struct window *w, enum gui_cursor cursor);
 void wm_window_translucent(struct window *w, bool on);
 void wm_window_move(struct window *w, int x, int y); // a popup, to x, y on the desktop
 void wm_window_raise(struct window *w);              // as the app asked
+void wm_window_fullscreen(struct window *w, bool on); // the app asked to cover the screen, or not
 void wm_window_gone(struct window *w);
 void wm_window_position(const struct window *w, int *x, int *y); // where its contents are on the desktop
 void wm_window_size(struct window *w, int width, int height); // the app drew at a new size
@@ -92,7 +93,7 @@ void server_part_drawn(struct scene_part *p, int x, int y, int width, int height
 // A window, as wm places and draws it: its contents, from the app, and around them
 // its frame, a part wm draws, its shadow, and a blur behind its title bar, or behind
 // contents that are see-through. While it moves between places, a copy of it, which
-// wm draws from wm_window_pixels' copy, stands in for all of it.
+// the GPU moves, scales and fades, stands in for all of it.
 struct window_look {
     bool shown;
     int x, y; // its contents' top left
@@ -105,11 +106,21 @@ struct window_look {
     bool blur_contents;  // see-through contents, blurred behind
     int border;          // its width, down the sides and along the bottom, under the title bar
     uint32_t border_color; // 0xRRGGBB
-    bool moving;         // shown by its copy instead
+    bool moving;         // shown by its copy instead, its frame at moving_x, moving_y, this big,
+    int moving_x, moving_y, moving_width, moving_height;
+    float moving_alpha;  // and this solid
 };
 void server_window_look(struct surface *s, const struct window_look *look);
 struct scene_part *server_window_frame(struct surface *s);
-struct scene_part *server_window_moving(struct surface *s);
+// Tells the app it covers the screen, or no longer does.
+void server_window_fullscreen(struct surface *s, bool on);
+
+// A copy of a window as it is now, sharing its textures, which the GPU draws over the
+// windows, its frame at x, y, width by height, alpha of it, as the window goes away.
+struct window_copy;
+struct window_copy *server_window_copy(struct surface *s);
+void server_copy_place(struct window_copy *c, int x, int y, int width, int height, float alpha);
+void server_copy_free(struct window_copy *c);
 void server_windows_order(struct surface *const *bottom_up, int count);
 // The window's contents, read back from the GPU into wm's copy, by wm_window_pixels.
 void server_window_read(struct surface *s);

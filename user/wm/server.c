@@ -77,7 +77,9 @@ struct scene_part {
     struct pixels_buffer *buffer;
     struct gui_canvas canvas;
     int x, y, width, height, scale;
+    unsigned drawn; // which drawing of it's in its buffer, of all parts', so copies know theirs is old
 };
+static unsigned parts_drawn;
 
 struct surface {
     struct wl_list link;
@@ -90,7 +92,9 @@ struct surface {
     struct wlr_scene_shadow *shadow;
     struct wlr_scene_blur *blur;
     struct wlr_scene_rect *border; // down its sides and along its bottom, a ring around its contents
-    struct scene_part *frame, *moving;
+    struct scene_part *frame;
+    struct window_copy *moving;
+    struct window_look look; // as wm last laid it out
     int contents_x, contents_y; // where wm last put its contents
     int seen_width, seen_height; // its size, as wm last heard it
     struct wlr_xdg_toplevel *toplevel; // one of these three
@@ -104,7 +108,7 @@ struct surface {
     bool translucent;
     bool keys[MAX_KEYS];
     struct wl_listener map, unmap, commit, destroy, title, app_id, configure, activate, associate, dissociate,
-        reposition, close;
+        reposition, close, fullscreen;
 };
 
 static struct server {
@@ -313,6 +317,7 @@ void server_part_drawn(struct scene_part *p, int x, int y, int width, int height
                                          | ((c >> 8 & 0xFF) * solid / 255) << 8 | (c & 0xFF) * solid / 255;
         }
     }
+    p->drawn = ++parts_drawn;
     pixman_region32_init_rect(&damage, x0, y0, x1 - x0, y1 - y0);
     wlr_scene_buffer_set_buffer_with_damage(p->node, &p->buffer->base, &damage);
     pixman_region32_fini(&damage);
@@ -603,10 +608,10 @@ static void scene_window_new(struct surface *s) {
 
 static void scene_window_gone(struct surface *s) {
     server_part_free(s->frame);
-    server_part_free(s->moving);
+    server_copy_free(s->moving);
     if (s->tree)
         wlr_scene_node_destroy(&s->tree->node);
-    s->tree = s->contents = NULL, s->shadow = NULL, s->blur = NULL, s->frame = s->moving = NULL;
+    s->tree = s->contents = NULL, s->shadow = NULL, s->blur = NULL, s->frame = NULL, s->moving = NULL;
     s->border = NULL;
 }
 
@@ -616,11 +621,6 @@ struct scene_part *server_window_frame(struct surface *s) {
     return s->frame;
 }
 
-struct scene_part *server_window_moving(struct surface *s) {
-    if (!s->moving && s->tree)
-        s->moving = part_in(s->tree); // over the rest
-    return s->moving;
-}
 
 // Its contents' corners rounded, as its frame's are: the buffers that reach them, of
 // the contents width by height, whose top left is at x, y in the contents tree.
@@ -654,11 +654,89 @@ static void round_contents(struct surface *s, const struct window_look *look) {
     wlr_scene_node_for_each_buffer(&s->contents->node, round_buffer, &c);
 }
 
+// A window's shadow, border and blur, for its frame at f, its title bar title_height
+// of it, alpha of them shown: the window's own, or its copy's.
+static void lay_shadow(struct wlr_scene_shadow *shadow, const struct window_look *look, struct wlr_box f, float alpha) {
+    int spread = look->shadow_size;
+
+    // A soft shadow, a little bigger than the frame, only around it, not under it,
+    // where it'd show through what's see-through.
+    wlr_scene_node_set_enabled(&shadow->node, look->shadow > 0);
+    if (look->shadow <= 0)
+        return;
+    wlr_scene_node_set_position(&shadow->node, f.x - spread, f.y - spread + look->shadow_drop);
+    wlr_scene_shadow_set_size(shadow, f.width + 2 * spread, f.height + 2 * spread);
+    wlr_scene_shadow_set_corner_radius(shadow, look->radius);
+    wlr_scene_shadow_set_blur_sigma(shadow, spread); // the frame, blurred out to the node's edge
+    wlr_scene_shadow_set_color(shadow, (float[4]){0, 0, 0, look->shadow * alpha});
+    wlr_scene_shadow_set_clipped_region(shadow, (struct clipped_region){
+                                                    {spread, spread - look->shadow_drop, f.width, f.height},
+                                                    corner_radii_all(look->radius)});
+}
+
+// The border down its sides and along its bottom, its corners rounded as the frame's,
+// with its contents' rounded rectangle cut out of it. The title bar's part has the top.
+static void lay_border(struct wlr_scene_rect *border, const struct window_look *look, struct wlr_box f, int title_height,
+                       float alpha) {
+    int top = f.y + title_height, height = f.height - title_height, b = look->border;
+    uint32_t c = look->border_color;
+
+    wlr_scene_node_set_enabled(&border->node, b > 0 && height > b && f.width > 2 * b);
+    if (b <= 0 || height <= b || f.width <= 2 * b)
+        return;
+    wlr_scene_node_set_position(&border->node, f.x, top);
+    wlr_scene_rect_set_size(border, f.width, height);
+    wlr_scene_rect_set_color(border, (float[4]){(c >> 16 & 0xFF) / 255.0f * alpha, (c >> 8 & 0xFF) / 255.0f * alpha,
+                                                (c & 0xFF) / 255.0f * alpha, alpha});
+    wlr_scene_rect_set_corner_radii(border, corner_radii_bottom(look->radius));
+    wlr_scene_rect_set_clipped_region(border, (struct clipped_region){
+                                                  {b, 0, f.width - 2 * b, height - b},
+                                                  corner_radii_bottom(look->radius > b ? look->radius - b : 0)});
+}
+
+// A blur behind its title bar, or its contents if they're see-through.
+static void lay_blur(struct wlr_scene_blur *blur, const struct window_look *look, struct wlr_box f, int title_height,
+                     float alpha) {
+    bool on = (look->blur_title && title_height > 0) || look->blur_contents;
+
+    wlr_scene_node_set_enabled(&blur->node, on);
+    if (!on)
+        return;
+    wlr_scene_node_set_position(&blur->node, f.x, f.y);
+    wlr_scene_blur_set_size(blur, f.width, look->blur_contents ? f.height : title_height);
+    wlr_scene_blur_set_alpha(blur, alpha);
+    wlr_scene_blur_set_corner_radii(blur, (struct fx_corner_radii){look->radius, look->radius,
+                                                                   look->blur_contents ? look->radius : 0,
+                                                                   look->blur_contents ? look->radius : 0});
+}
+
+// A copy of a window: buffers in the scene of its own, showing the same buffers as its
+// frame and contents, so the GPU draws them from the textures it has, each where it
+// was in the frame, at, in the desktop's pixels, with a shadow, border and blur.
+#define COPY_BUFFERS 32
+struct window_copy {
+    struct wlr_scene_tree *tree;
+    struct wlr_scene_shadow *shadow;
+    struct wlr_scene_blur *blur;
+    struct wlr_scene_rect *border;
+    struct window_look look; // the window's, as it was copied
+    int count;
+    struct {
+        struct wlr_scene_buffer *node;
+        struct wlr_buffer *from; // the buffer it shows, which may since have been let go of
+        unsigned drawn;          // for a part's, which of its drawings
+        struct wlr_box at;
+    } buffers[COPY_BUFFERS];
+};
+
+static void copy_window(struct window_copy *c, struct surface *s);
+
 void server_window_look(struct surface *s, const struct window_look *look) {
-    float black[4] = {0, 0, 0, look->shadow};
+    struct wlr_box f = {look->frame_x, look->frame_y, look->frame_width, look->frame_height};
 
     if (!s->tree)
         return;
+    s->look = *look;
     wlr_scene_node_set_enabled(&s->tree->node, look->shown);
     if (!look->shown)
         return;
@@ -667,55 +745,143 @@ void server_window_look(struct surface *s, const struct window_look *look) {
     round_contents(s, look);
     wlr_scene_node_set_enabled(&s->contents->node, !look->moving);
     if (s->frame)
-        wlr_scene_node_set_enabled(&s->frame->tree->node, !look->moving);
-    if (s->moving)
-        wlr_scene_node_set_enabled(&s->moving->tree->node, look->moving);
-
-    // A soft shadow, a little bigger than the frame, and a blur behind its title bar, or
-    // its contents if they're see-through.
-    wlr_scene_node_set_enabled(&s->shadow->node, look->shadow > 0 && !look->moving);
-    if (look->shadow > 0) {
-        int spread = look->shadow_size;
-
-        wlr_scene_node_set_position(&s->shadow->node, look->frame_x - spread, look->frame_y - spread + look->shadow_drop);
-        wlr_scene_shadow_set_size(s->shadow, look->frame_width + 2 * spread, look->frame_height + 2 * spread);
-        wlr_scene_shadow_set_corner_radius(s->shadow, look->radius);
-        wlr_scene_shadow_set_blur_sigma(s->shadow, spread); // the frame, blurred out to the node's edge
-        wlr_scene_shadow_set_color(s->shadow, black);
-        // Only around it, not under it, where it'd show through what's see-through.
-        wlr_scene_shadow_set_clipped_region(s->shadow, (struct clipped_region){
-                                                           {spread, spread - look->shadow_drop, look->frame_width,
-                                                            look->frame_height},
-                                                           corner_radii_all(look->radius)});
+        wlr_scene_node_set_enabled(&s->frame->tree->node, !look->moving && look->title_height > 0);
+    if (look->moving && !s->moving && (s->moving = server_window_copy(s)))
+        wlr_scene_node_reparent(&s->moving->tree->node, s->tree); // in the window's place among the others
+    if (s->moving && look->moving) {
+        copy_window(s->moving, s); // as it is now, as it may have drawn since
+        server_copy_place(s->moving, look->moving_x, look->moving_y, look->moving_width, look->moving_height,
+                          look->moving_alpha);
     }
-    // The border down its sides and along its bottom, its corners rounded as the frame's,
-    // with its contents' rounded rectangle cut out of it. The title bar's part has the top.
-    float color[4] = {(look->border_color >> 16 & 0xFF) / 255.0f, (look->border_color >> 8 & 0xFF) / 255.0f,
-                      (look->border_color & 0xFF) / 255.0f, 1};
-    int top = look->frame_y + look->title_height, height = look->frame_height - look->title_height, b = look->border;
-
-    wlr_scene_node_set_enabled(&s->border->node, b > 0 && height > b && !look->moving);
-    if (b > 0 && height > b) {
-        wlr_scene_node_set_position(&s->border->node, look->frame_x, top);
-        wlr_scene_rect_set_size(s->border, look->frame_width, height);
-        wlr_scene_rect_set_color(s->border, color);
-        wlr_scene_rect_set_corner_radii(s->border, corner_radii_bottom(look->radius));
-        wlr_scene_rect_set_clipped_region(s->border, (struct clipped_region){
-                                                         {b, 0, look->frame_width - 2 * b, height - b},
-                                                         corner_radii_bottom(look->radius > b ? look->radius - b : 0)});
+    if (s->moving && !look->moving) { // which lets go of the buffers it showed, for the app to draw in again
+        server_copy_free(s->moving);
+        s->moving = NULL;
     }
-    bool blur = ((look->blur_title && look->title_height > 0) || look->blur_contents) && !look->moving;
-
-    wlr_scene_node_set_enabled(&s->blur->node, blur);
-    if (blur) {
-        int height = look->blur_contents ? look->frame_height : look->title_height;
-
-        wlr_scene_node_set_position(&s->blur->node, look->frame_x, look->frame_y);
-        wlr_scene_blur_set_size(s->blur, look->frame_width, height);
-        wlr_scene_blur_set_corner_radii(s->blur, (struct fx_corner_radii){look->radius, look->radius,
-                                                                          look->blur_contents ? look->radius : 0,
-                                                                          look->blur_contents ? look->radius : 0});
+    if (look->moving) {
+        wlr_scene_node_set_enabled(&s->shadow->node, false);
+        wlr_scene_node_set_enabled(&s->border->node, false);
+        wlr_scene_node_set_enabled(&s->blur->node, false);
+        return;
     }
+    lay_shadow(s->shadow, look, f, 1);
+    lay_border(s->border, look, f, look->title_height, 1);
+    lay_blur(s->blur, look, f, look->title_height, 1);
+}
+
+// One of the window's buffers into the copy's index'th, at in its frame, unless it's
+// the same buffer, as it was, already.
+static void copy_buffer(struct window_copy *c, struct wlr_buffer *buffer, unsigned drawn, struct wlr_box at,
+                        const struct wlr_scene_buffer *like) {
+    int i = c->count;
+
+    if (i == COPY_BUFFERS || !buffer || at.width <= 0 || at.height <= 0)
+        return;
+    if (!c->buffers[i].node && !(c->buffers[i].node = wlr_scene_buffer_create(c->tree, NULL)))
+        return;
+    struct wlr_scene_buffer *node = c->buffers[i].node;
+
+    if (c->buffers[i].from != buffer || c->buffers[i].drawn != drawn)
+        wlr_scene_buffer_set_buffer(node, buffer);
+    c->buffers[i].from = buffer, c->buffers[i].drawn = drawn, c->buffers[i].at = at;
+    if (like) {
+        wlr_scene_buffer_set_source_box(node, &like->src_box);
+        wlr_scene_buffer_set_transform(node, like->transform);
+        wlr_scene_buffer_set_corner_radii(node, like->corners);
+    }
+    wlr_scene_node_raise_to_top(&node->node); // in the window's order
+    wlr_scene_node_set_enabled(&node->node, true);
+    c->count++;
+}
+
+// The buffers shown in a tree, x, y from the frame's top left, but for those hidden.
+static void copy_tree(struct window_copy *c, struct wlr_scene_tree *tree, int x, int y) {
+    struct wlr_scene_node *node;
+
+    wl_list_for_each(node, &tree->children, link) {
+        if (!node->enabled)
+            continue;
+        if (node->type == WLR_SCENE_NODE_TREE) {
+            copy_tree(c, wlr_scene_tree_from_node(node), x + node->x, y + node->y);
+        } else if (node->type == WLR_SCENE_NODE_BUFFER) {
+            struct wlr_scene_buffer *b = wlr_scene_buffer_from_node(node);
+            int width = b->dst_width ? b->dst_width : b->buffer ? b->buffer->width / server.scale : 0;
+            int height = b->dst_height ? b->dst_height : b->buffer ? b->buffer->height / server.scale : 0;
+
+            copy_buffer(c, b->buffer, 0, (struct wlr_box){x + node->x, y + node->y, width, height}, b);
+        }
+    }
+}
+
+// The copy, made again from the window as it is: its frame and its contents.
+static void copy_window(struct window_copy *c, struct surface *s) {
+    const struct window_look *look = &s->look;
+
+    c->look = *look;
+    c->count = 0;
+    if (s->frame && s->frame->buffer && look->title_height > 0)
+        copy_buffer(c, &s->frame->buffer->base, s->frame->drawn,
+                    (struct wlr_box){s->frame->x - look->frame_x, s->frame->y - look->frame_y, s->frame->width,
+                                     s->frame->height}, NULL);
+    if (s->contents)
+        copy_tree(c, s->contents, s->contents->node.x - look->frame_x, s->contents->node.y - look->frame_y);
+    for (int i = c->count; i < COPY_BUFFERS && c->buffers[i].node; i++) {
+        wlr_scene_node_destroy(&c->buffers[i].node->node);
+        c->buffers[i].node = NULL, c->buffers[i].from = NULL;
+    }
+}
+
+struct window_copy *server_window_copy(struct surface *s) {
+    struct window_copy *c = s->tree ? calloc(1, sizeof(*c)) : NULL;
+
+    if (!c || !(c->tree = wlr_scene_tree_create(server.layers[LAYER_OVER]))) {
+        free(c);
+        return NULL;
+    }
+    wlr_scene_node_lower_to_bottom(&c->tree->node); // under all else over the windows
+    c->shadow = wlr_scene_shadow_create(c->tree, 0, 0, 0, 0, (float[4]){0, 0, 0, 0});
+    c->blur = wlr_scene_blur_create(c->tree, 0, 0);
+    c->border = wlr_scene_rect_create(c->tree, 0, 0, (float[4]){0, 0, 0, 1});
+    copy_window(c, s);
+    return c;
+}
+
+void server_copy_place(struct window_copy *c, int x, int y, int width, int height, float alpha) {
+    const struct window_look *look = &c->look;
+    float sx = look->frame_width > 0 ? (float)width / look->frame_width : 1;
+    float sy = look->frame_height > 0 ? (float)height / look->frame_height : 1;
+    struct wlr_box f = {x, y, width, height};
+
+    if (width <= 0 || height <= 0) {
+        wlr_scene_node_set_enabled(&c->tree->node, false);
+        return;
+    }
+    wlr_scene_node_set_enabled(&c->tree->node, true);
+    for (int i = 0; i < c->count; i++) {
+        struct wlr_box at = c->buffers[i].at;
+        int left = x + (int)(at.x * sx + 0.5f), top = y + (int)(at.y * sy + 0.5f);
+        int right = x + (int)((at.x + at.width) * sx + 0.5f), bottom = y + (int)((at.y + at.height) * sy + 0.5f);
+
+        wlr_scene_node_set_position(&c->buffers[i].node->node, left, top);
+        wlr_scene_buffer_set_dest_size(c->buffers[i].node, right > left ? right - left : 1, bottom > top ? bottom - top : 1);
+        wlr_scene_buffer_set_opacity(c->buffers[i].node, alpha);
+    }
+    lay_shadow(c->shadow, look, f, alpha);
+    lay_border(c->border, look, f, (int)(look->title_height * sy + 0.5f), alpha);
+    lay_blur(c->blur, look, f, (int)(look->title_height * sy + 0.5f), alpha);
+}
+
+void server_copy_free(struct window_copy *c) {
+    if (!c)
+        return;
+    wlr_scene_node_destroy(&c->tree->node); // and the buffers in it, which let go of theirs
+    free(c);
+}
+
+void server_window_fullscreen(struct surface *s, bool on) {
+    if (s->toplevel && s->toplevel->base->initialized)
+        wlr_xdg_toplevel_set_fullscreen(s->toplevel, on);
+    else if (s->xsurface)
+        wlr_xwayland_surface_set_fullscreen(s->xsurface, on);
 }
 
 void server_windows_order(struct surface *const *bottom_up, int count) {
@@ -872,6 +1038,21 @@ static const char *app_of(const struct surface *s) {
     return app ? app : "";
 }
 
+// An app asking to cover the screen, or to stop, which wm says it does, or doesn't.
+static bool wants_fullscreen(const struct surface *s) {
+    return s->toplevel ? s->toplevel->requested.fullscreen : s->xsurface && s->xsurface->fullscreen;
+}
+
+static void on_fullscreen(struct wl_listener *l, void *data) {
+    struct surface *s = wl_container_of(l, s, fullscreen);
+
+    (void)data;
+    if (s->window)
+        wm_window_fullscreen(s->window, wants_fullscreen(s));
+    else if (s->toplevel && s->toplevel->base->initialized)
+        wlr_xdg_surface_schedule_configure(s->toplevel->base); // it'll be asked once it's shown
+}
+
 static void on_map(struct wl_listener *l, void *data) {
     struct surface *s = wl_container_of(l, s, map);
     struct wlr_box g = geometry_of(s);
@@ -900,6 +1081,8 @@ static void on_map(struct wl_listener *l, void *data) {
     place_contents(s);
     printf("wm: %s opened a window, %dx%d at %d %d\n", app_of(s), s->seen_width, s->seen_height, s->contents_x,
            s->contents_y);
+    if (!popup && wants_fullscreen(s))
+        wm_window_fullscreen(s->window, true);
 }
 
 static void on_unmap(struct wl_listener *l, void *data) {
@@ -950,6 +1133,7 @@ static void on_destroy(struct wl_listener *l, void *data) {
     if (s->toplevel) {
         wl_list_remove(&s->title.link);
         wl_list_remove(&s->app_id.link);
+        wl_list_remove(&s->fullscreen.link);
     }
     if (s->popup)
         wl_list_remove(&s->reposition.link);
@@ -961,6 +1145,7 @@ static void on_destroy(struct wl_listener *l, void *data) {
         wl_list_remove(&s->associate.link);
         wl_list_remove(&s->dissociate.link);
         wl_list_remove(&s->close.link);
+        wl_list_remove(&s->fullscreen.link);
     }
     forget(s);
 }
@@ -999,6 +1184,8 @@ static void on_new_toplevel(struct wl_listener *l, void *data) {
     wl_signal_add(&toplevel->events.set_title, &s->title);
     s->app_id.notify = on_app_id;
     wl_signal_add(&toplevel->events.set_app_id, &s->app_id);
+    s->fullscreen.notify = on_fullscreen;
+    wl_signal_add(&toplevel->events.request_fullscreen, &s->fullscreen);
 }
 
 // A popup moved by its app, such as a menu that's grown.
@@ -1153,6 +1340,8 @@ static void on_new_xsurface(struct wl_listener *l, void *data) {
     wl_signal_add(&xsurface->events.associate, &s->associate);
     s->dissociate.notify = on_x_dissociate;
     wl_signal_add(&xsurface->events.dissociate, &s->dissociate);
+    s->fullscreen.notify = on_fullscreen;
+    wl_signal_add(&xsurface->events.request_fullscreen, &s->fullscreen);
 }
 
 static void on_xwayland_ready(struct wl_listener *l, void *data) {

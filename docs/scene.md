@@ -17,12 +17,14 @@ From the bottom:
    - the frame: title bar and border, drawn by wm into a buffer of its own,
      translucent where the title bar's glass is;
    - the app's surfaces, straight from its buffers, as `wlr_scene_subsurface_tree`,
-     with rounded bottom corners, or a popup's surfaces, with no frame.
+     with rounded bottom corners, or a popup's surfaces, with no frame;
+   - while it opens, is restored, maximized or tiled, a copy of it, which stands in
+     for the rest (see Animations).
 3. **Overlay**: each part wm draws over the windows, in a buffer of its own: the
    taskbar, the open panel, menus, notices, the volume and brightness popup, the
-   switcher, the overview, the password dialog, snapping's outline, the dragged
-   file's icon, and closing windows' fading copies. Each glass part has a SceneFX
-   blur behind it.
+   switcher, the overview, the password dialog, snapping's outline and the dragged
+   file's icon, over closing and minimized windows' copies. Each glass part has a
+   SceneFX blur behind it.
 4. **Cursor**: wm's own, in a small buffer.
 
 ## Why many buffers
@@ -55,6 +57,27 @@ no longer has a copy of each window. Where it still needs one, for opening and
 closing animations, the overview and the taskbar's previews, it reads the window's
 textures back from the GPU when that starts.
 
+## Animations
+
+SceneFX can't scale a tree, so a moving window is shown by a copy of it: a tree of
+its own, with a buffer node for each of the window's, its frame part's and its
+surfaces', showing the same buffers. The GPU draws them from the textures it already
+has, as an app's buffer's texture is its `wlr_client_buffer`'s, so nothing's read
+back or uploaded. Each frame, wm says where the frame is now and how solid, and each
+node is placed and sized in proportion, with a shadow, border and blur of the copy's
+own around them. A window opening or moving is copied again each frame, which only
+points nodes at buffers, so it shows what the app draws meanwhile; a closing or
+minimized one keeps its copy, which holds its buffers after the app's let them go.
+A moving window's copy is let go of when it gets there, so the app has its buffers
+back to draw in.
+
+## Fullscreen
+
+A fullscreen window, as the app asks, through xdg-shell or EWMH, or Super+F, has no
+frame and covers the screen, over the taskbar. Once it's on top, if it's solid,
+nothing under it is in the scene: the desktop and the other windows are disabled, so the GPU composites
+that window and what's over the windows, such as a notice, and nothing else.
+
 ## Stages
 
 1. **Scene, windows on the GPU** (fixes video stutter). Done: the renderer, the scene
@@ -64,6 +87,9 @@ textures back from the GPU when that starts.
    VM at 2x, playing video, wm's own thread went from doing all the copying to about
    10% of a core. Opening and closing animations still draw their copies on the CPU,
    in a part, as they did.
-2. **Animations on the GPU**: a window's copy uploaded once, then moved, scaled and
-   faded by the GPU, rather than drawn again each frame.
-3. **Fullscreen**: a fullscreen app's buffer goes straight to the screen.
+2. **Animations on the GPU**. Done: windows opening, closing, minimizing, restoring,
+   maximizing and tiling are copies the GPU moves, scales and fades, sharing the
+   window's textures, rather than drawn on the CPU each frame. Fullscreen windows
+   are all that's composited, but for what's over them.
+3. **Direct scanout**: a fullscreen app's buffer goes straight to the screen, with
+   no compositing at all, where the GPU's planes can take it.

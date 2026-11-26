@@ -48,7 +48,10 @@ Still to come: screens beyond the first.
   windows straight from their buffers, and what wm draws itself, the desktop, title bars,
   the taskbar, panels, menus and the cursor, each in a part of its own, uploaded only
   when it changes. Glass blurs what's behind it on the GPU, flyouts fade and slide there,
-  and the night light is a colour transform there. At 2x, everything's drawn at the
+  windows open, close, minimize and tile there, as copies sharing their textures, and
+  the night light is a colour transform there. A fullscreen window, as its app or
+  Super+F asks, covers the taskbar, and is all that's composited, but for what's over
+  it. At 2x, everything's drawn at the
   screen's own resolution, and only laid out in the desktop's pixels, each two of the
   screen's across.
 - **Icons** are 16x16, with a 32x32 one for 2x beside each, `name@2x.png`, which
@@ -94,7 +97,16 @@ Still to come: screens beyond the first.
 
 ## Building
 
-On Arch, or anything with Arch's packages:
+On Arch, or anything based on it, `build.sh` installs whatever the build needs and
+builds the live ISO, `build/aximos.iso`, in one go; `./build.sh packages` stops at the
+packages, and `./build.sh all` builds wm and the apps here. Without AximOS's signing
+key, the packages are built unsigned, which the ISO takes.
+
+```bash
+./build.sh
+```
+
+Or by hand:
 
 ```bash
 sudo pacman -S --needed base-devel wlroots0.20 wayland-protocols libinput libxkbcommon pixman libpulse pam stb mpg123 lame flac libvorbis opus faad2 faac

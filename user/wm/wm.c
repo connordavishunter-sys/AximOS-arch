@@ -114,6 +114,7 @@ static const struct theme *theme = &dark;
 #define KEY_R 0x13
 #define KEY_L 0x26
 #define KEY_S 0x1F
+#define KEY_F 0x21 // Super+F: full screen
 #define TASKS_COMMAND "tasks" // Ctrl+Shift+Escape
 #define HINT "Super: apps   Super+R: run   Super+Enter: terminal   Alt+Tab: switch   Super+Q: close   Super+arrows: tile   " \
              "Super+1-4: workspaces   Super+Shift+Q: quit"
@@ -172,15 +173,17 @@ struct window {
     bool popup; // a menu or tooltip of an app's, with no frame, where the app put it
     bool translucent; // its pixels' top bytes say how see-through they are, 0 for not at all
     int workspace;
+    bool fullscreen;      // covering the screen, with no frame, as the app or Super+F asked
+    struct rect windowed; // its frame before, to go back to
 
     // While it opens, is restored, maximized or tiled, it goes from anim_from to
-    // its frame over anim_ms, fading in if anim_fade, drawn from layer, a copy of it.
+    // its frame over anim_ms, fading in if anim_fade, shown by a copy of it.
     int anim_ms;
     bool anim_fade;
     int64_t anim_start;
     struct rect anim_from, anim_to; // where it was going as of the last frame
-    struct gui_canvas layer;
-    bool copy_stale; // changed since layer was drawn, for the overview or a preview
+    struct gui_canvas layer; // a copy of it, for the overview and previews
+    bool copy_stale; // changed since layer was drawn
     bool contents_stale; // the app's drawn since canvas was read back from the GPU
     int frame_width, frame_scale; // as its title bar was last drawn, in its part
     bool frame_stale;
@@ -271,7 +274,7 @@ static int command_count;
 enum action { ACT_NONE, ACT_LINE, ACT_APP, ACT_FOLDER, ACT_RUN, ACT_LOCK, ACT_LOG_OUT, ACT_SUSPEND, ACT_REBOOT, ACT_SHUT_DOWN,
               ACT_OPEN, ACT_OPEN_WITH, ACT_OPEN_IN, ACT_RUN_FILE, ACT_CUT, ACT_COPY, ACT_COPY_PATH, ACT_RENAME,
               ACT_DELETE, ACT_PROPERTIES, ACT_REFRESH, ACT_SHOW_ICONS, ACT_POSITION, ACT_TOP, ACT_BOTTOM, ACT_AUTOHIDE,
-              ACT_NEW_FOLDER, ACT_NEW_FILE, ACT_SETTINGS, ACT_WIN_SHOW, ACT_WIN_MINIMIZE, ACT_WIN_MAXIMIZE, ACT_WIN_CLOSE };
+              ACT_NEW_FOLDER, ACT_NEW_FILE, ACT_SETTINGS, ACT_WIN_SHOW, ACT_WIN_MINIMIZE, ACT_WIN_MAXIMIZE, ACT_WIN_FULLSCREEN, ACT_WIN_CLOSE };
 #define MAX_ITEMS 40
 struct item {
     char label[GUI_TITLE_MAX];
@@ -337,8 +340,13 @@ static const struct cursor_shape shapes[] = {
 };
 static enum gui_cursor cursor_shown = GUI_CURSOR_ARROW;
 
+// Whether it has wm's frame: not the log-in screen's, a popup or fullscreen.
+static bool framed(const struct window *w) {
+    return !w->bare && !w->fullscreen;
+}
+
 static struct rect frame_of(const struct window *w) {
-    if (w->bare)
+    if (!framed(w))
         return (struct rect){w->x, w->y, w->canvas.width, w->canvas.height};
     return (struct rect){w->x - BORDER, w->y - TITLE_HEIGHT - BORDER, w->canvas.width + 2 * BORDER,
                          w->canvas.height + TITLE_HEIGHT + 2 * BORDER};
@@ -364,9 +372,11 @@ static struct rect button_of(const struct window *w, int index) {
 // The taskbar goes along the top or the bottom of the screen. Hidden, it comes
 // back while the mouse is at that edge, or on it.
 static bool bar_shown = true;
+static struct window *fullscreen_top(void);
 
+// It's hidden too under a fullscreen window.
 static bool bar_visible(void) {
-    return !settings.autohide || bar_shown;
+    return (!settings.autohide || bar_shown) && !fullscreen_top();
 }
 
 // The taskbar and its flyouts float this far from the screen's edges, and from each other.
@@ -447,6 +457,25 @@ static bool on_workspace(const struct window *w) {
 
 static bool visible(const struct window *w) {
     return !w->minimized && on_workspace(w) && (!locked || w->login);
+}
+
+// The fullscreen window on top, once it's got there, which covers everything else
+// but what's over the windows, or NULL.
+static struct window *fullscreen_top(void) {
+    for (int i = window_count - 1; i >= 0; i--) {
+        struct window *w = windows[i];
+
+        if (visible(w) && !w->popup)
+            return w->fullscreen && !w->anim_ms ? w : NULL;
+    }
+    return NULL;
+}
+
+// That window, if it's solid, so nothing under it shows.
+static struct window *covering(void) {
+    struct window *w = fullscreen_top();
+
+    return w && !see_through(w) ? w : NULL;
 }
 
 static bool overlaps(struct rect a, struct rect b) {
@@ -770,7 +799,7 @@ static void draw_contents(struct gui_canvas *c, const struct window *w, int ox, 
 // Windows have rounded corners, but for those maximized or tiled, which meet the
 // edges of the screen or each other.
 static bool rounded(const struct window *w) {
-    return !w->tiled;
+    return !w->tiled && !w->fullscreen;
 }
 
 static void draw_window(struct gui_canvas *c, const struct window *w, int ox, int oy) {
@@ -780,7 +809,7 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
 
     if (round)
         keep_corners(c, frame, ox, oy, kept);
-    if (w->bare) {
+    if (!framed(w)) {
         if (!drawing_part)
             draw_contents(c, w, ox, oy);
         round_corners(c, frame, ox, oy, kept, GUI_NONE);
@@ -938,11 +967,11 @@ static int64_t now_ms(void) {
 #define MAXIMIZE_MS 200
 #define ANIM_SCALE 240 // out of 256, the size windows start opening and finish closing at
 
-// A window going away, closed or minimized, drawn from a copy of how it looked.
+// A window going away, closed or minimized, shown by a copy of how it looked, which
+// the GPU moves, scales and fades.
 struct ghost {
-    struct gui_canvas layer;
-    bool rounded, translucent;
-    int shadow, ms;
+    struct window_copy *copy;
+    int ms;
     int64_t start;
     struct rect from, to;
 };
@@ -1076,10 +1105,6 @@ static struct rect drawn_extent(const struct window *w) {
 static void arrive(struct window *w, struct rect from, int ms) {
     if (!settings.animations || w->bare)
         return;
-    // What the animation it replaces drew, between where that went from and to,
-    // is drawn over.
-    if (w->anim_ms)
-        add_damage(bounds(with_shadow(w->anim_from), with_shadow(w->anim_to)));
     w->anim_from = from;
     w->anim_to = wanted_frame(w);
     w->anim_ms = ms;
@@ -1104,9 +1129,8 @@ static void depart(struct window *w, struct rect to, int ms) {
 
     if (!settings.animations || w->bare || !visible(w) || ghost_count == MAX_WINDOWS)
         return;
-    *g = (struct ghost){.rounded = rounded(w), .translucent = see_through(w), .shadow = w->shadow, .ms = ms,
-                        .start = now_ms(), .from = frame_of(w), .to = to};
-    if (fill_layer(&g->layer, w))
+    *g = (struct ghost){.copy = server_window_copy(w->surface), .ms = ms, .start = now_ms(), .from = frame_of(w), .to = to};
+    if (g->copy)
         ghost_count++;
 }
 
@@ -1120,8 +1144,7 @@ static bool animate(void) {
         if (!w->anim_ms)
             continue;
         w->anim_to = wanted_frame(w);
-        add_damage(drawn_extent(w));
-        if (progress(w->anim_start, w->anim_ms) < 256 && fill_layer(&w->layer, w))
+        if (progress(w->anim_start, w->anim_ms) < 256)
             going = true;
         else
             w->anim_ms = 0;
@@ -1129,12 +1152,11 @@ static bool animate(void) {
     for (int i = 0; i < ghost_count; i++) {
         struct ghost *g = &ghosts[i];
 
-        add_damage(bounds(with_shadow(g->from), with_shadow(g->to)));
         if (progress(g->start, g->ms) < 256) {
             going = true;
             continue;
         }
-        free(g->layer.pixels);
+        server_copy_free(g->copy);
         *g-- = ghosts[--ghost_count];
     }
     return going;
@@ -4344,7 +4366,7 @@ static void hover_layouts(void) {
         add_damage(layout_rect());
         return;
     }
-    if (w && part == PART_MAXIMIZE && !w->bare) {
+    if (w && part == PART_MAXIMIZE && framed(w)) {
         if (w != layout_for) {
             hide_layouts();
             layout_for = w;
@@ -4462,13 +4484,12 @@ static int flyout_progress(int64_t start) {
     return settings.animations ? progress(start, FLYOUT_MS) : 256;
 }
 
-// What wm draws, in the scene. The desktop, each window's title bar and, while it
-// moves, its copy, and the parts over the windows, each drawn in a part of its own,
-// where what's changed overlaps it, by its draw_ function, with its offset. Over the
-// windows, from the bottom:
+// What wm draws, in the scene. The desktop, each window's title bar, and the parts
+// over the windows, each drawn in a part of its own, where what's changed overlaps
+// it, by its draw_ function, with its offset. Over the windows, over the copies of
+// those going away, from the bottom:
 enum {
-    PIECE_GHOSTS,                                // closing windows, fading
-    PIECE_OVERVIEW = PIECE_GHOSTS + MAX_WINDOWS, // all the windows, side by side
+    PIECE_OVERVIEW, // all the windows, side by side
     PIECE_SNAP, PIECE_TASKBAR,
     PIECE_NOTICES,
     PIECE_OSD = PIECE_NOTICES + MAX_NOTICES,
@@ -4525,13 +4546,6 @@ static void draw_desktop_piece(struct gui_canvas *c, int ox, int oy, int arg) {
         gui_text(c, GUI_CHAR_WIDTH - ox, hint_y - oy, HINT, HINT_COLOR, 1);
         draw_desktop(c, ox, oy);
     }
-}
-
-static void draw_ghost_piece(struct gui_canvas *c, int ox, int oy, int i) {
-    const struct ghost *g = &ghosts[i];
-    int t = ease_in(progress(g->start, g->ms));
-
-    draw_layer(c, &g->layer, between(g->from, g->to, t), 256 - t, g->shadow, g->rounded, g->translucent, ox, oy);
 }
 
 static void draw_overview_piece(struct gui_canvas *c, int ox, int oy, int arg) {
@@ -4612,14 +4626,6 @@ static void draw_cursor_piece(struct gui_canvas *c, int ox, int oy, int arg) {
 
 static void draw_frame_piece(struct gui_canvas *c, int ox, int oy, int i) {
     draw_window(c, windows[i], ox, oy);
-}
-
-static void draw_moving_piece(struct gui_canvas *c, int ox, int oy, int i) {
-    struct window *w = windows[i];
-    int alpha;
-    struct rect now = arriving(w, &alpha);
-
-    draw_layer(c, &w->layer, now, alpha, w->shadow, rounded(w), see_through(w), ox, oy);
 }
 
 // The part of a part that's changed, drawn: from see-through, but for the desktop.
@@ -4723,26 +4729,34 @@ static bool animate_flyouts(void) {
 }
 
 // Each window placed, its title bar drawn if it's new or its size changed, and while
-// it moves between places, its copy drawn instead.
+// it moves between places, its copy shown instead, moved, scaled and faded by the GPU.
+// Under a solid fullscreen window, nothing's shown.
 static void lay_windows(void) {
     struct surface *order[MAX_WINDOWS];
     float shadow = settings.shadows ? 0.5f : 0.0f;
+    struct window *full = covering();
+    bool covered = full != NULL;
 
     for (int i = 0; i < window_count; i++) {
         struct window *w = windows[i];
         struct rect f = frame_of(w);
         bool moving = w->anim_ms != 0;
+        int alpha = 256;
+        struct rect now = moving ? arriving(w, &alpha) : f;
         struct window_look look = {
-            .shown = visible(w) && !overview, .x = w->x, .y = w->y,
+            .shown = visible(w) && !overview && !covered, .x = w->x, .y = w->y,
             .frame_x = f.x, .frame_y = f.y, .frame_width = f.width, .frame_height = f.height,
-            .radius = rounded(w) ? RADIUS : 0, .shadow = w->bare ? 0 : shadow * w->shadow / 256.0f,
+            .radius = rounded(w) ? RADIUS : 0, .shadow = framed(w) ? shadow * w->shadow / 256.0f : 0,
             .shadow_size = SHADOW, .shadow_drop = SHADOW_DROP,
-            .title_height = w->bare ? 0 : TITLE_HEIGHT + BORDER, .blur_title = glass() > 0,
-            .blur_contents = see_through(w) && glass() > 0, .border = w->bare ? 0 : BORDER,
-            .border_color = BORDER_COLOR, .moving = moving};
+            .title_height = framed(w) ? TITLE_HEIGHT + BORDER : 0, .blur_title = glass() > 0,
+            .blur_contents = see_through(w) && glass() > 0, .border = framed(w) ? BORDER : 0,
+            .border_color = BORDER_COLOR, .moving = moving,
+            .moving_x = now.x, .moving_y = now.y, .moving_width = now.width, .moving_height = now.height,
+            .moving_alpha = alpha / 256.0f};
 
+        covered = covered && w != full; // those above it show
         order[i] = w->surface;
-        if (!w->bare) {
+        if (framed(w)) {
             struct scene_part *frame = server_window_frame(w->surface);
             struct rect title = {f.x, f.y, f.width, TITLE_HEIGHT + BORDER};
             struct gui_canvas *c = frame ? server_part_place(frame, title.x, title.y, title.width, title.height) : NULL;
@@ -4754,16 +4768,8 @@ static void lay_windows(void) {
             if (frame)
                 server_part_show(frame, true);
         }
-        if (moving) {
-            struct scene_part *copy = server_window_moving(w->surface);
-            struct rect e = drawn_extent(w);
-            struct gui_canvas *c = copy ? server_part_place(copy, e.x, e.y, e.width, e.height) : NULL;
-
-            if (c)
-                draw_in(copy, c, e, e, true, draw_moving_piece, i);
-            if (copy)
-                server_part_show(copy, true);
-        }
+        if (w == full)
+            look.shown = visible(w) && !overview;
         server_window_look(w->surface, &look);
     }
     server_windows_order(order, window_count);
@@ -4774,18 +4780,12 @@ static void lay_over(void) {
     struct rect all = {0, 0, screen.width, screen.height}, bar = taskbar();
     bool up = !locked;
 
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        struct piece *p = &pieces[PIECE_GHOSTS + i];
+    for (int i = 0; i < ghost_count; i++) {
+        const struct ghost *g = &ghosts[i];
+        int t = ease_in(progress(g->start, g->ms));
+        struct rect now = between(g->from, g->to, t);
 
-        p->opacity = 1, p->blur = 0, p->radius = 0;
-        if (i < ghost_count) {
-            const struct ghost *g = &ghosts[i];
-
-            lay_piece(p, LAYER_OVER, true, bounds(with_shadow(g->from), with_shadow(g->to)), draw_ghost_piece, i);
-            add_damage(p->at); // as it fades each frame
-        } else if (p->part) {
-            lay_piece(p, LAYER_OVER, false, all, draw_ghost_piece, i);
-        }
+        server_copy_place(g->copy, now.x, now.y, now.width, now.height, (256 - t) / 256.0f);
     }
     pieces[PIECE_OVERVIEW].opacity = 1;
     lay_piece(&pieces[PIECE_OVERVIEW], LAYER_OVER, overview, all, draw_overview_piece, 0);
@@ -4856,9 +4856,9 @@ static void compose(struct rect r) {
     for (int i = 0; i < window_count; i++) {
         struct window *w = windows[i];
         struct rect f = frame_of(w), title = {f.x, f.y, f.width, TITLE_HEIGHT + BORDER};
-        struct scene_part *frame = w->bare ? NULL : server_window_frame(w->surface);
+        struct scene_part *frame = framed(w) ? server_window_frame(w->surface) : NULL;
 
-        if (frame && visible(w) && overlaps(title, r))
+        if (frame && visible(w) && framed(w) && overlaps(title, r))
             draw_in(frame, server_part_place(frame, title.x, title.y, title.width, title.height), title, r, true,
                     draw_frame_piece, i);
     }
@@ -4875,6 +4875,7 @@ static void redraw(void) {
         draw_in(desktop_piece.part, server_part_place(desktop_piece.part, 0, 0, screen.width, screen.height), all,
                 desktop_damage[i], false, draw_desktop_piece, 0);
     desktop_damage_count = 0;
+    server_part_show(desktop_piece.part, !covering());
     lay_windows();
     lay_over();
     for (int i = 0; i < damage_count; i++)
@@ -5156,7 +5157,7 @@ void wm_window_raise(struct window *w) {
 // Asks for a new size, unless an answer is still awaited, in which case this is
 // asked for once it comes.
 static void ask_size(struct window *w, int width, int height) {
-    struct rect d = desktop();
+    struct rect d = w->fullscreen ? (struct rect){0, 0, screen.width, screen.height} : desktop();
 
     w->want_width = width < MIN_WIDTH ? MIN_WIDTH : width > d.width ? d.width : width;
     w->want_height = height < MIN_HEIGHT ? MIN_HEIGHT : height > d.height ? d.height : height;
@@ -5390,12 +5391,12 @@ static struct window *window_at(int x, int y, enum part *part, int *edges) {
     for (int i = window_count - 1; i >= 0 && !overview; i--) {
         struct window *w = windows[i];
         struct rect f = frame_of(w);
-        int margin = w->bare ? 0 : RESIZE_MARGIN;
+        int margin = framed(w) ? RESIZE_MARGIN : 0;
         struct rect grab = {f.x - margin, f.y - margin, f.width + 2 * margin, f.height + 2 * margin};
 
         if (!visible(w) || !contains(grab, x, y))
             continue;
-        *edges = w->bare ? 0 : edges_at(f, x, y);
+        *edges = framed(w) ? edges_at(f, x, y) : 0;
         *part = *edges ? PART_RESIZE
               : contains(button_of(w, 0), x, y) ? PART_CLOSE
               : contains(button_of(w, 1), x, y) ? PART_MAXIMIZE
@@ -5844,6 +5845,7 @@ static void open_desktop_menu(int index) {
 
 // A window's taskbar button's: what can be done with the window from there.
 static void toggle_maximized(struct window *w);
+static void set_fullscreen(struct window *w, bool on);
 
 static void open_window_menu(struct window *w) {
     struct popup *p = &popups[0];
@@ -5853,8 +5855,10 @@ static void open_window_menu(struct window *w) {
     menu_window = w;
     p->count = 0;
     add_item(p, w->minimized ? ACT_WIN_SHOW : ACT_WIN_MINIMIZE, w->minimized ? "Restore" : "Minimize", NULL, NULL);
-    if (!w->bare)
+    if (framed(w))
         add_item(p, ACT_WIN_MAXIMIZE, w->tiled ? "Restore size" : "Maximize", NULL, NULL);
+    if (!w->bare)
+        add_item(p, ACT_WIN_FULLSCREEN, w->fullscreen ? "Leave full screen" : "Full screen", NULL, NULL);
     add_item(p, ACT_LINE, "", NULL, NULL);
     add_item(p, ACT_WIN_CLOSE, "Close", NULL, NULL);
     place_popup(p, cursor_x, 0, MENU_WIDTH);
@@ -6073,6 +6077,7 @@ static void act(const struct item *item) {
     case ACT_WIN_SHOW:
     case ACT_WIN_MINIMIZE:
     case ACT_WIN_MAXIMIZE:
+    case ACT_WIN_FULLSCREEN:
     case ACT_WIN_CLOSE:
         if (!menu_window)
             break;
@@ -6084,6 +6089,9 @@ static void act(const struct item *item) {
         else if (item->action == ACT_WIN_MAXIMIZE) {
             show(menu_window);
             toggle_maximized(menu_window);
+        } else if (item->action == ACT_WIN_FULLSCREEN) {
+            show(menu_window);
+            set_fullscreen(menu_window, !menu_window->fullscreen);
         } else
             send_to(menu_window, (struct gui_message){.type = GUI_CLOSE});
         break;
@@ -6192,6 +6200,7 @@ static void untile(struct window *w) {
 
 // Moves a window, smoothly, to a part of the desktop, or back where it was for SNAP_NONE.
 static void snap_to(struct window *w, enum snap to) {
+    set_fullscreen(w, false);
     struct rect was = frame_of(w);
 
     if (to == SNAP_NONE)
@@ -6206,6 +6215,40 @@ static void snap_to(struct window *w, enum snap to) {
 
 static void toggle_maximized(struct window *w) {
     snap_to(w, w->tiled ? SNAP_NONE : SNAP_TOP);
+}
+
+// Covers the screen with a window, with no frame, over the taskbar, or puts it back
+// where it was, as smoothly as maximizing. The app's told, so it can draw as it does
+// fullscreen, as a video player's controls hide.
+static void set_fullscreen(struct window *w, bool on) {
+    struct rect was = frame_of(w), back = w->windowed;
+
+    if (w->bare || w->fullscreen == on)
+        return;
+    if (on)
+        w->windowed = was;
+    w->fullscreen = on;
+    w->resize_edges = 0;
+    w->frame_stale = true; // its title may have changed meanwhile
+    server_window_fullscreen(w->surface, on);
+    if (on) {
+        move_window(w, 0, 0);
+        ask_size(w, screen.width, screen.height);
+    } else {
+        move_window(w, back.x + BORDER, back.y + TITLE_HEIGHT + BORDER);
+        ask_size(w, back.width - 2 * BORDER, back.height - TITLE_HEIGHT - 2 * BORDER);
+    }
+    if (on)
+        show(w);
+    reframe(w, was);
+    damage_taskbar();
+    printf("wm: %s %s full screen\n", w->title, on ? "went" : "left");
+}
+
+void wm_window_fullscreen(struct window *w, bool on) {
+    set_fullscreen(w, on);
+    if (w->fullscreen != on) // a popup's, or as it was already: it's told how it is
+        server_window_fullscreen(w->surface, w->fullscreen);
 }
 
 // Super+Up and Down take a window on one side to its top or bottom quarter, and
@@ -6834,6 +6877,11 @@ static void handle_key(const struct key_event *e) {
             launch(TASKS_COMMAND);
         return;
     }
+    if (super && e->code == KEY_F) {
+        if (e->pressed && focused)
+            set_fullscreen(focused, !focused->fullscreen);
+        return;
+    }
     if (super && e->code == KEY_L && can_lock()) {
         if (e->pressed)
             lock();
@@ -6924,6 +6972,11 @@ static void fit_windows(struct rect was) {
             center(w);
         if (w->bare)
             continue;
+        if (w->fullscreen) {
+            move_window(w, 0, 0);
+            ask_size(w, screen.width, screen.height);
+            continue;
+        }
         if (w->tiled) {
             place(w, (struct rect){(f.x - was.x) * now.width / was.width + now.x,
                                    (f.y - was.y) * now.height / was.height + now.y, f.width * now.width / was.width,
