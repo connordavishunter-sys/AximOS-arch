@@ -3762,9 +3762,37 @@ static void desktop_rename_key(const struct key_event *e) {
         return desktop_rename_done(false);
     if (e->code == KEY_ENTER || e->code == (KEY_EXTENDED | KEY_ENTER))
         return desktop_rename_done(true);
-    if ((e->modifiers & KEY_MOD_CTRL) && (e->text == 'a' || e->text == 1))
+    bool ctrl = e->modifiers & KEY_MOD_CTRL;
+
+    if (ctrl && (e->text == 'a' || e->text == 1))
         rename_anchor = 0, rename_at = length;
-    else if (e->code == KEY_LEFT || e->code == KEY_RIGHT || e->code == KEY_HOME || e->code == KEY_END) {
+    else if (ctrl && (e->text == 'c' || e->text == 3 || e->text == 'x' || e->text == 24) && low != high) {
+        // Copied, or cut, for apps too, as what's on the clipboard.
+        char *copy = strndup(desktop_new_name + low, high - low);
+
+        if (copy) {
+            free(clipboard);
+            clipboard = copy, clipboard_length = high - low, clipboard_width = clipboard_height = 0;
+            server_set_clipboard(clipboard, clipboard_length, 0, 0);
+            remember_clipboard();
+        }
+        if (e->text == 'x' || e->text == 24) {
+            memmove(desktop_new_name + low, desktop_new_name + high, length - high + 1);
+            rename_at = rename_anchor = low;
+        }
+    } else if (ctrl && (e->text == 'v' || e->text == 22) && clipboard && !clipboard_width) {
+        // The clipboard's text, up to its first line, without the characters a name can't have.
+        char pasted[sizeof(desktop_new_name)];
+        size_t n = 0;
+
+        for (size_t i = 0; i < clipboard_length && clipboard[i] != '\n' && clipboard[i] != '\r'; i++) {
+            if ((unsigned char)clipboard[i] >= ' ' && clipboard[i] != '/' && length - (high - low) + n + 1 < sizeof(pasted))
+                pasted[n++] = clipboard[i];
+        }
+        memmove(desktop_new_name + low + n, desktop_new_name + high, length - high + 1);
+        memcpy(desktop_new_name + low, pasted, n);
+        rename_at = rename_anchor = low + n;
+    } else if (e->code == KEY_LEFT || e->code == KEY_RIGHT || e->code == KEY_HOME || e->code == KEY_END) {
         rename_at = e->code == KEY_HOME ? 0 : e->code == KEY_END ? length
                   : !shift && low != high ? (e->code == KEY_LEFT ? low : high)
                   : e->code == KEY_LEFT ? (rename_at ? rename_at - 1 : 0) : (rename_at < length ? rename_at + 1 : length);
@@ -5808,6 +5836,8 @@ static void put_path(const char *path, bool cut) {
     clipboard_length = clipboard ? strlen(path) : 0;
     clipboard_width = clipboard_height = 0;
     remember_clipboard();
+    if (clipboard) // for apps to paste, as Files does
+        server_set_clipboard(clipboard, clipboard_length, 0, 0);
     unlink(CUT);
     if (cut && (f = fopen(CUT, "w"))) {
         fputs(path, f);

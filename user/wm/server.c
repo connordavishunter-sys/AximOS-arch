@@ -127,6 +127,15 @@ static struct server {
     bool read_image;
 } server;
 
+// What wlroots says: its errors, and why it refused an app's copy, which is otherwise
+// only said with everything else, with WM_DEBUG.
+static void wlroots_said(enum wlr_log_importance importance, const char *format, va_list args) {
+    if (importance > WLR_ERROR && !getenv("WM_DEBUG") && !strstr(format, "Rejecting set_selection"))
+        return;
+    vfprintf(stderr, format, args);
+    fputc('\n', stderr);
+}
+
 // Milliseconds, for Wayland's events, which only compare them.
 static uint32_t now_ms(void) {
     struct timespec t;
@@ -391,7 +400,10 @@ static void gather(struct surface *s, struct wlr_surface *committed) {
             return;
         free(s->pixels);
         s->pixels = pixels, s->width = width, s->height = height, s->scale = server.scale;
-    } else if (committed && l.found && l.hash == s->layout) {
+    } else if (committed == s->surface && l.hash == s->layout && wl_list_empty(&s->surface->current.subsurfaces_above)
+               && wl_list_empty(&s->surface->current.subsurfaces_below)) {
+        // With no other surfaces, only what the app says it changed. One with them, such
+        // as Firefox's page, in a subsurface synchronized with the window's, is all copied.
         pixman_box32_t *b = pixman_region32_extents(&committed->buffer_damage);
         struct wlr_fbox src;
         double across, down;
@@ -492,7 +504,7 @@ static void on_subsurface_commit(struct wl_listener *l, void *data) {
 
     (void)data;
     if (s && s->surface != sub->surface) {
-        gather(s, sub->surface);
+        gather(s, NULL);
         if (server.output)
             wlr_output_schedule_frame(server.output);
     }
@@ -1434,7 +1446,11 @@ static void on_request_cursor(struct wl_listener *l, void *data) {
 // Input. The pointer is wlr_cursor's, which knows the screen's edges and accelerates
 // mice as libinput does, and wm is told where it is.
 
-static void tell_pointer(void) {
+// After wm's had it, the app whose window the pointer's over keeps the pointer's
+// focus, even when wm didn't pass this event on, as for a move too small to be one
+// of the desktop's pixels at 2x: leaving and coming back would start a double click
+// over. A press wm didn't give an app, outside them all, closes their popups.
+static void tell_pointer(bool pressed) {
     double width = server.screen->width, height = server.screen->height;
     struct wlr_box box;
 
@@ -1454,9 +1470,13 @@ static void tell_pointer(void) {
     server.input->mouse(&e);
     if (server.seat->drag)
         drag_to(server.cursor->x - box.x, server.cursor->y - box.y);
-    else if (!server.pointer_sent && server.seat->pointer_state.focused_surface && !server.buttons)
-        wlr_seat_pointer_notify_clear_focus(server.seat);
-    if (!server.pointer_sent && server.buttons)
+    else if (!server.pointer_sent && server.seat->pointer_state.focused_surface && !server.buttons) {
+        int sx, sy;
+
+        if (!wm_surface_at((int)(server.cursor->x - box.x), (int)(server.cursor->y - box.y), &sx, &sy))
+            wlr_seat_pointer_notify_clear_focus(server.seat);
+    }
+    if (!server.pointer_sent && pressed)
         dismiss_popups(NULL);
 }
 
@@ -1465,7 +1485,7 @@ static void on_motion(struct wl_listener *l, void *data) {
 
     (void)l;
     wlr_cursor_move(server.cursor, &e->pointer->base, e->delta_x, e->delta_y);
-    tell_pointer();
+    tell_pointer(false);
 }
 
 static void on_motion_absolute(struct wl_listener *l, void *data) {
@@ -1473,7 +1493,7 @@ static void on_motion_absolute(struct wl_listener *l, void *data) {
 
     (void)l;
     wlr_cursor_warp_absolute(server.cursor, &e->pointer->base, e->x, e->y);
-    tell_pointer();
+    tell_pointer(false);
 }
 
 static void on_button(struct wl_listener *l, void *data) {
@@ -1497,7 +1517,7 @@ static void on_button(struct wl_listener *l, void *data) {
     if (!mask)
         return;
     server.buttons = e->state == WL_POINTER_BUTTON_STATE_PRESSED ? server.buttons | mask : server.buttons & ~mask;
-    tell_pointer();
+    tell_pointer(e->state == WL_POINTER_BUTTON_STATE_PRESSED);
 }
 
 // Notches of the wheel, as wm counts them: towards the user is down the page and positive.
@@ -1754,7 +1774,7 @@ static bool open_server(struct screen *screen) {
     static struct wl_listener new_surface_listener;
     const char *socket;
 
-    wlr_log_init(getenv("WM_DEBUG") ? WLR_DEBUG : WLR_ERROR, NULL);
+    wlr_log_init(WLR_DEBUG, wlroots_said);
     server.screen = screen;
     server.scale = 1;
     server.read_fd = -1;

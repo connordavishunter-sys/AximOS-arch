@@ -1024,10 +1024,9 @@ char *gui_clipboard_get(size_t *length) {
     size_t have = 0;
     char *text = NULL;
 
+    wl_display_roundtrip(wl.display); // the newest selection, and its types, and whether it's still this program's
     if (wl.own && !wl.own_image)
         text = strndup(wl.own, wl.own_length), have = wl.own_length;
-    else
-        wl_display_roundtrip(wl.display); // the newest selection, and its types
     o = wl.selection ? wl_data_offer_get_user_data(wl.selection) : NULL;
     if (!text && o && (o->text || o->plain))
         text = receive(wl.selection, o->text ? TEXT_TYPE : "text/plain", &have);
