@@ -51,7 +51,9 @@ app_dir = $(strip $(foreach f,$(APP_FOLDERS),$(if $(filter $(1),$(APPS_$(f))),$(
 GUI_TOOLS := run notify
 LIBEXEC_TOOLS := login
 LIBS_player := -laudio -lpthread
-LIBS_settings := -laudio
+LIBS_settings := -laudio -lsystemd
+EXTRA_settings := user/wm/network.c # the network, as wm's tray has it
+FLAGS_settings := -Iuser/wm
 LIBS_login := -lpam
 
 LIBAXIMOS := $(BUILD)/lib/libaximos.so
@@ -101,9 +103,9 @@ $(LIBGUI): $(wildcard user/libgui/*.c user/libgui/*.h user/libgui/include/*.h) $
 	$(CC) $(CFLAGS) $(shell pkg-config --cflags $(GUI_PACKAGES)) -shared -Wl,-soname,libgui.so \
 		$(filter %.c,$^) $(LDFLAGS) $(shell pkg-config --libs $(GUI_PACKAGES)) -ldl -lm -o $@
 
-$(APP_PATHS): $(BUILD)/apps/%: $$(wildcard user/$$*/*.c user/$$*/*.h) $(LIBGUI) $(LIBAUDIO)
+$(APP_PATHS): $(BUILD)/apps/%: $$(wildcard user/$$*/*.c user/$$*/*.h) $$(EXTRA_$$*) $(LIBGUI) $(LIBAUDIO)
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(filter %.c,$^) $(LDFLAGS) -lgui -laximos $(LIBS_$*) -lm -o $@
+	$(CC) $(CFLAGS) $(FLAGS_$*) $(filter %.c,$^) $(LDFLAGS) -lgui -laximos $(LIBS_$*) -lm -o $@
 
 $(TOOL_PATHS): $$(wildcard user/$$(notdir $$@)/*.c) $(LIBGUI)
 	@mkdir -p $(@D)

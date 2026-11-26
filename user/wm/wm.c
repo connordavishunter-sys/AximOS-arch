@@ -1,5 +1,6 @@
 #include <aximos.h>
 #include "network.h"
+#include "polkit.h"
 #include "server.h"
 #include <arpa/inet.h>
 #include <audio.h>
@@ -260,7 +261,8 @@ static int command_count;
 // it, or the taskbar, with one item's submenu open at a time beside it.
 enum action { ACT_NONE, ACT_LINE, ACT_APP, ACT_FOLDER, ACT_RUN, ACT_LOCK, ACT_LOG_OUT, ACT_SUSPEND, ACT_REBOOT, ACT_SHUT_DOWN,
               ACT_OPEN, ACT_OPEN_WITH, ACT_OPEN_IN, ACT_RUN_FILE, ACT_CUT, ACT_COPY, ACT_COPY_PATH, ACT_RENAME,
-              ACT_DELETE, ACT_PROPERTIES, ACT_REFRESH, ACT_SHOW_ICONS, ACT_POSITION, ACT_TOP, ACT_BOTTOM, ACT_AUTOHIDE };
+              ACT_DELETE, ACT_PROPERTIES, ACT_REFRESH, ACT_SHOW_ICONS, ACT_POSITION, ACT_TOP, ACT_BOTTOM, ACT_AUTOHIDE,
+              ACT_NEW_FOLDER, ACT_NEW_FILE, ACT_SETTINGS, ACT_WIN_SHOW, ACT_WIN_MINIMIZE, ACT_WIN_MAXIMIZE, ACT_WIN_CLOSE };
 #define MAX_ITEMS 40
 struct item {
     char label[GUI_TITLE_MAX];
@@ -278,6 +280,7 @@ static struct popup popups[2];       // the menu and its submenu
 static int popup_depth, popup_focus; // how many are open, and which has the keyboard
 static bool start_open;              // whether the menu's the start menu
 static char popup_file[GUI_PATH_MAX]; // the desktop's icon a menu's about
+static struct window *menu_window;     // or the window, for its taskbar button's
 static bool super_down, super_alone; // Super pressed, and nothing else since
 
 // The Alt+Tab switcher, while Alt is held: which window it's on, counting from the top.
@@ -846,6 +849,25 @@ static struct rect taskbar_button(int index, int count) {
     int width = count && room / count < TASKBAR_BUTTON_WIDTH ? room / count : TASKBAR_BUTTON_WIDTH;
 
     return (struct rect){start + index * width, taskbar().y + 4, width - 4, TASKBAR_HEIGHT - 8};
+}
+
+// Where the taskbar's buttons are, when that changes, for the tests to find them.
+static void report_taskbar(void) {
+    static char said[4096];
+    char now[4096] = "";
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list), used = 0;
+
+    for (int i = 0; i < count && used < (int)sizeof(now) - 160; i++) {
+        struct rect b = taskbar_button(i, count);
+
+        used += snprintf(now + used, sizeof(now) - used, "wm: taskbar button %d at %d %d %d %d, %.60s\n", i, b.x, b.y,
+                         b.width, b.height, list[i]->title);
+    }
+    if (strcmp(now, said)) {
+        fputs(now, stdout);
+        memcpy(said, now, sizeof(said));
+    }
 }
 
 // Text cut to fit a width, which is how titles go on the taskbar.
@@ -2357,6 +2379,124 @@ static void network_changed(const char *was_joining, int joined) {
     }
 }
 
+static void close_menu(void);
+
+// The password polkit asks for, when an app wants something only an admin can do,
+// in a dialog over everything, which has the keyboard until it's answered.
+#define AUTH_WIDTH 440
+#define AUTH_HEIGHT 200
+static char auth_typed[256];
+static bool auth_shown;
+
+static struct rect auth_rect(void) {
+    return (struct rect){(screen.width - AUTH_WIDTH) / 2, (screen.height - AUTH_HEIGHT) / 2, AUTH_WIDTH, AUTH_HEIGHT};
+}
+
+static struct rect auth_field(void) {
+    struct rect r = auth_rect();
+
+    return (struct rect){r.x + 16, r.y + 102, r.width - 32, 28};
+}
+
+static struct rect auth_button(int i) { // 0 Cancel, 1 Authenticate
+    struct rect r = auth_rect();
+
+    return (struct rect){r.x + r.width - 16 - 120 - (1 - i) * 128, r.y + r.height - 16 - 28, 120, 28};
+}
+
+static void draw_auth(struct gui_canvas *c, int ox, int oy) {
+    const struct polkit_request *p = polkit_now();
+    struct rect r = auth_rect(), f = auth_field();
+    const char *m = p->message;
+    char line[256], dots[64];
+    size_t typed = strlen(auth_typed) < sizeof(dots) - 1 ? strlen(auth_typed) : sizeof(dots) - 1;
+
+    draw_glass(c, r, ox, oy);
+    gui_text(c, r.x + 16 - ox, r.y + 14 - oy, "Authentication needed", TASKBAR_TEXT, 1);
+    for (int i = 0, y = r.y + 40; i < 2 && *m; i++, y += 20) { // what it's for, in up to two lines
+        size_t n = gui_text_fit(m, strlen(m), r.width - 32);
+
+        while (m[n] && n > 0 && m[n] != ' ')
+            n--;
+        n = n ? n : gui_text_fit(m, strlen(m), r.width - 32);
+        snprintf(line, sizeof(line), "%.*s", (int)n, m);
+        gui_text(c, r.x + 16 - ox, y - oy, line, TASKBAR_DIM_TEXT, 1);
+        for (m += n; *m == ' '; m++)
+            ;
+    }
+    snprintf(line, sizeof(line), "Password for %s", p->user);
+    gui_text(c, f.x - ox, f.y - 22 - oy, line, TASKBAR_TEXT, 1);
+    memset(dots, '*', typed);
+    dots[typed] = '\0';
+    gui_fill_rounded(c, f.x - ox, f.y - oy, f.width, f.height, SMALL_RADIUS, TITLE_FOCUSED);
+    gui_fill_rounded(c, f.x + 1 - ox, f.y + 1 - oy, f.width - 2, f.height - 2, SMALL_RADIUS, TASKBAR_COLOR);
+    gui_text(c, f.x + 8 - ox, f.y + (f.height - GUI_CHAR_HEIGHT) / 2 - oy, dots, TASKBAR_TEXT, 1);
+    if (!p->checking)
+        gui_fill(c, f.x + 8 + gui_text_width(dots, 1) - ox, f.y + 7 - oy, 1, f.height - 14, TASKBAR_TEXT);
+    gui_text(c, r.x + 16 - ox, auth_button(0).y + 6 - oy, p->checking ? "Checking..." : p->wrong ? "That password isn't right."
+                                                                                                  : "",
+             TASKBAR_DIM_TEXT, 1);
+    draw_button(c, auth_button(0), "Cancel", false, ox, oy);
+    draw_button(c, auth_button(1), "Authenticate", true, ox, oy);
+}
+
+// Shown as polkit asks, and gone as it's answered.
+static void auth_changed(void) {
+    bool asking = polkit_now()->asking;
+
+    if (asking != auth_shown) {
+        auth_shown = asking;
+        explicit_bzero(auth_typed, sizeof(auth_typed));
+        add_damage(auth_rect());
+        if (asking) {
+            struct rect r = auth_rect(), a = auth_button(1), b = auth_button(0);
+
+            close_menu();
+            close_panel();
+            printf("wm: password dialog at %d %d %d %d\n", r.x, r.y, r.width, r.height);
+            printf("wm: auth button Authenticate at %d %d %d %d\n", a.x, a.y, a.width, a.height);
+            printf("wm: auth button Cancel at %d %d %d %d\n", b.x, b.y, b.width, b.height);
+        }
+        return;
+    }
+    add_damage(auth_rect());
+}
+
+static void auth_submit(void) {
+    if (auth_typed[0] && !polkit_now()->checking) {
+        polkit_answer(auth_typed);
+        explicit_bzero(auth_typed, sizeof(auth_typed));
+    }
+    add_damage(auth_rect());
+}
+
+static void auth_key(const struct key_event *e) {
+    size_t length = strlen(auth_typed);
+
+    if (!e->pressed)
+        return;
+    if (e->code == KEY_ESCAPE)
+        polkit_cancel();
+    else if (e->code == KEY_ENTER || e->code == (KEY_EXTENDED | KEY_ENTER))
+        auth_submit();
+    else if (e->code == KEY_BACKSPACE && length)
+        auth_typed[length - 1] = '\0';
+    else if (e->text >= ' ' && e->text < 0x7F && length + 1 < sizeof(auth_typed))
+        auth_typed[length] = (char)e->text, auth_typed[length + 1] = '\0';
+    auth_changed();
+}
+
+static void auth_mouse(uint32_t pressed, bool moved) {
+    if (pressed & MOUSE_BUTTON_LEFT) {
+        if (contains(auth_button(0), cursor_x, cursor_y))
+            polkit_cancel();
+        else if (contains(auth_button(1), cursor_x, cursor_y))
+            auth_submit();
+    }
+    if (pressed || moved)
+        auth_changed();
+}
+
 static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
     struct rect clear = clear_button(TRAY_NOTICES);
 
@@ -3168,6 +3308,9 @@ static void tint(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t c
     }
 }
 
+static char desktop_renaming[256]; // what's being renamed, below
+static void draw_rename_field(struct gui_canvas *c, int i, int ox, int oy);
+
 static void draw_desktop(struct gui_canvas *c, int ox, int oy) {
     for (int i = 0; i < desktop_count && !settings.hide_icons; i++) {
         struct rect r = desktop_cell(i);
@@ -3180,6 +3323,10 @@ static void draw_desktop(struct gui_canvas *c, int ox, int oy) {
         if (item->picture.pixels)
             gui_draw_image(c, r.x + (r.width - item->picture.width / scale) / 2 - ox,
                            r.y + 6 + (DESKTOP_ICON - item->picture.height / scale) / 2 - oy, &item->picture);
+        if (!strcmp(item->name, desktop_renaming)) {
+            draw_rename_field(c, i, ox, oy);
+            continue;
+        }
         snprintf(label, sizeof(label), "%.10s", item->name);
         width = gui_text_width(label, 1);
         gui_text(c, r.x + (r.width - width) / 2 + 1 - ox, r.y + DESKTOP_ICON + 13 - oy, label, 0x000000, 1);
@@ -3193,6 +3340,178 @@ static void select_desktop_item(int index) {
     desktop_selected = index;
     if (index >= 0)
         add_damage(desktop_cell(index));
+}
+
+// Renaming what's on the desktop where its name's shown, as Windows does: the name
+// but for its extension is selected, typing changes it, Enter or a click elsewhere
+// keeps it, and Escape doesn't.
+static char desktop_new_name[256];
+static size_t rename_at, rename_anchor; // the cursor, and the other end of what's selected
+
+static int renamed_index(void) {
+    for (int i = 0; desktop_renaming[0] && i < desktop_count; i++) {
+        if (!strcmp(desktop_items[i].name, desktop_renaming))
+            return i;
+    }
+    return -1;
+}
+
+// The box, under its icon, as wide as the name, from the cell's width to three cells'.
+static struct rect rename_field(int i) {
+    struct rect r = desktop_cell(i);
+    int width = gui_text_width(desktop_new_name, 1) + 16;
+
+    width = width < r.width ? r.width : width > 3 * r.width ? 3 * r.width : width;
+    return (struct rect){r.x + (r.width - width) / 2, r.y + DESKTOP_ICON + 9, width, GUI_CHAR_HEIGHT + 6};
+}
+
+static void damage_rename(void) {
+    int i = renamed_index();
+
+    if (i >= 0) {
+        add_damage(rename_field(i));
+        add_damage(desktop_cell(i));
+    }
+}
+
+static void start_desktop_rename(const char *name) {
+    const char *dot;
+
+    damage_rename();
+    snprintf(desktop_renaming, sizeof(desktop_renaming), "%s", name);
+    snprintf(desktop_new_name, sizeof(desktop_new_name), "%s", name);
+
+    int i = renamed_index();
+
+    if (i < 0) {
+        desktop_renaming[0] = '\0';
+        return;
+    }
+    dot = desktop_items[i].folder ? NULL : strrchr(desktop_new_name, '.');
+    rename_anchor = 0;
+    rename_at = dot && dot > desktop_new_name ? (size_t)(dot - desktop_new_name) : strlen(desktop_new_name);
+    select_desktop_item(i);
+    damage_rename();
+
+    struct rect f = rename_field(i);
+
+    printf("wm: renaming %s on the desktop, in a box at %d %d %d %d\n", name, f.x, f.y, f.width, f.height);
+}
+
+// Done, keeping the new name or not. The layout has it under its new name, so it
+// stays where it was on the grid.
+static void desktop_rename_done(bool keep) {
+    int i = renamed_index();
+    char from[GUI_PATH_MAX], to[GUI_PATH_MAX];
+
+    damage_rename();
+    if (keep && i >= 0 && desktop_new_name[0] && strcmp(desktop_new_name, desktop_renaming) && !strchr(desktop_new_name, '/')) {
+        snprintf(from, sizeof(from), "%s/%s", desktop_dir, desktop_renaming);
+        snprintf(to, sizeof(to), "%s/%s", desktop_dir, desktop_new_name);
+        if (access(to, F_OK) == 0 || rename(from, to) < 0) {
+            printf("wm: couldn't rename %s to %s\n", desktop_renaming, desktop_new_name);
+        } else {
+            printf("wm: renamed %s to %s on the desktop\n", desktop_renaming, desktop_new_name);
+            snprintf(desktop_items[i].name, sizeof(desktop_items[i].name), "%s", desktop_new_name);
+            save_layout();
+            desktop_renaming[0] = '\0';
+            load_desktop(true);
+            for (int j = 0; j < desktop_count; j++) {
+                if (!strcmp(desktop_items[j].name, desktop_new_name))
+                    select_desktop_item(j);
+            }
+            return;
+        }
+    }
+    desktop_renaming[0] = '\0';
+}
+
+static void desktop_rename_key(const struct key_event *e) {
+    size_t length = strlen(desktop_new_name), low = rename_at < rename_anchor ? rename_at : rename_anchor;
+    size_t high = rename_at < rename_anchor ? rename_anchor : rename_at;
+    bool shift = e->modifiers & KEY_MOD_SHIFT;
+
+    if (!e->pressed)
+        return;
+    damage_rename();
+    if (e->code == KEY_ESCAPE)
+        return desktop_rename_done(false);
+    if (e->code == KEY_ENTER || e->code == (KEY_EXTENDED | KEY_ENTER))
+        return desktop_rename_done(true);
+    if ((e->modifiers & KEY_MOD_CTRL) && (e->text == 'a' || e->text == 1))
+        rename_anchor = 0, rename_at = length;
+    else if (e->code == KEY_LEFT || e->code == KEY_RIGHT || e->code == KEY_HOME || e->code == KEY_END) {
+        rename_at = e->code == KEY_HOME ? 0 : e->code == KEY_END ? length
+                  : !shift && low != high ? (e->code == KEY_LEFT ? low : high)
+                  : e->code == KEY_LEFT ? (rename_at ? rename_at - 1 : 0) : (rename_at < length ? rename_at + 1 : length);
+        rename_anchor = shift ? rename_anchor : rename_at;
+    } else if ((e->code == KEY_BACKSPACE || e->code == KEY_DELETE) && low != high) {
+        memmove(desktop_new_name + low, desktop_new_name + high, length - high + 1);
+        rename_at = rename_anchor = low;
+    } else if (e->code == KEY_BACKSPACE && rename_at > 0) {
+        memmove(desktop_new_name + rename_at - 1, desktop_new_name + rename_at, length - rename_at + 1);
+        rename_at = rename_anchor = rename_at - 1;
+    } else if (e->code == KEY_DELETE && rename_at < length) {
+        memmove(desktop_new_name + rename_at, desktop_new_name + rename_at + 1, length - rename_at);
+    } else if (e->text >= ' ' && e->text < 0x7F && e->text != '/' && !(e->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT))
+               && length - (high - low) + 1 < sizeof(desktop_new_name)) {
+        memmove(desktop_new_name + low + 1, desktop_new_name + high, length - high + 1);
+        desktop_new_name[low] = (char)e->text;
+        rename_at = rename_anchor = low + 1;
+    }
+    damage_rename();
+}
+
+static void draw_rename_field(struct gui_canvas *c, int i, int ox, int oy) {
+    struct rect f = rename_field(i);
+    size_t low = rename_at < rename_anchor ? rename_at : rename_anchor, high = rename_at < rename_anchor ? rename_anchor : rename_at;
+    char part[256];
+    int x = f.x + 8, y = f.y + 3;
+    int fits = (int)gui_text_fit(desktop_new_name, strlen(desktop_new_name), f.width - 16);
+    size_t first = rename_at > (size_t)fits ? rename_at - fits : 0; // long names scroll to the cursor
+
+    gui_fill_rounded(c, f.x - ox, f.y - oy, f.width, f.height, SMALL_RADIUS, TITLE_FOCUSED);
+    gui_fill_rounded(c, f.x + 1 - ox, f.y + 1 - oy, f.width - 2, f.height - 2, SMALL_RADIUS, TASKBAR_COLOR);
+    if (low < high && high > first) {
+        size_t from = low > first ? low : first;
+
+        snprintf(part, sizeof(part), "%.*s", (int)(from - first), desktop_new_name + first);
+        int start = gui_text_width(part, 1);
+
+        snprintf(part, sizeof(part), "%.*s", (int)(high - from), desktop_new_name + from);
+        gui_fill(c, x + start - ox, y - oy, gui_text_width(part, 1), GUI_CHAR_HEIGHT, TITLE_FOCUSED);
+    }
+    snprintf(part, sizeof(part), "%.*s", fits + 1, desktop_new_name + first);
+    struct gui_canvas inside = gui_part(c, 0, 0, f.x + f.width - 6 - ox > 0 ? f.x + f.width - 6 - ox : 0, c->height);
+
+    inside.width = inside.width < c->width ? inside.width : c->width;
+    gui_text(&inside, x - ox, y - oy, part, TASKBAR_TEXT, 1);
+    snprintf(part, sizeof(part), "%.*s", (int)(rename_at - first), desktop_new_name + first);
+    gui_fill(c, x + gui_text_width(part, 1) - ox, y - oy, 1, GUI_CHAR_HEIGHT, TASKBAR_TEXT);
+}
+
+// A new folder or empty file on the desktop, called what's free of "New folder",
+// "New folder 2" and on, then renamed in place.
+static void desktop_new(bool folder) {
+    char name[64], path[GUI_PATH_MAX];
+    int fd;
+
+    for (int n = 1; n < 1000; n++) {
+        if (folder)
+            snprintf(name, sizeof(name), n > 1 ? "New folder %d" : "New folder", n);
+        else
+            snprintf(name, sizeof(name), n > 1 ? "New file %d.txt" : "New file.txt", n);
+        snprintf(path, sizeof(path), "%s/%s", desktop_dir, name);
+        if (folder ? mkdir(path, 0755) == 0 : (fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) >= 0 && close(fd) == 0) {
+            printf("wm: made %s\n", path);
+            load_desktop(true);
+            start_desktop_rename(name);
+            return;
+        }
+        if (errno != EEXIST)
+            break;
+    }
+    printf("wm: couldn't make a new %s: %s\n", folder ? "folder" : "file", strerror(errno));
 }
 
 // A click on the desktop selects what's there, or nothing, and a second soon after opens it.
@@ -3993,6 +4312,8 @@ static void draw_area(struct rect r, struct gui_canvas c) {
 
         gui_draw_image(&c, d.x - r.x, d.y - r.y, drag_icon);
     }
+    if (auth_shown)
+        draw_auth(&c, r.x, r.y);
     if (!no_cursor)
         draw_cursor(&c, r.x, r.y);
 }
@@ -4237,6 +4558,8 @@ static void remove_window(struct window *w) {
         focused = NULL;
         focus_top();
     }
+    if (menu_window == w)
+        menu_window = NULL;
     free(w->canvas.pixels);
     free(w->layer.pixels);
     free(w);
@@ -4412,6 +4735,13 @@ void wm_settings_changed(void) {
 void wm_unlock(void) {
     if (locked)
         unlock();
+}
+
+void wm_desktop_drop(const char *path) {
+    if (locked || (bar_visible() && contains(taskbar(), cursor_x, cursor_y)))
+        return;
+    printf("wm: %s dropped on the desktop\n", path);
+    copy_to_desktop(path);
 }
 
 void wm_clipboard_changed(char *data, size_t length, int width, int height) {
@@ -4964,10 +5294,36 @@ static void open_desktop_menu(int index) {
         add_item(p, ACT_LINE, "", NULL, NULL);
         add_item(p, ACT_PROPERTIES, "Properties", NULL, NULL);
     } else {
+        add_item(p, ACT_NEW_FOLDER, "New folder", NULL, NULL);
+        add_item(p, ACT_NEW_FILE, "New file", NULL, NULL);
+        add_item(p, ACT_LINE, "", NULL, NULL);
         add_item(p, ACT_REFRESH, "Refresh", NULL, NULL);
         add_check(p, ACT_SHOW_ICONS, "Show icons", !settings.hide_icons);
+        add_item(p, ACT_LINE, "", NULL, NULL);
+        add_item(p, ACT_SETTINGS, "Settings", NULL, NULL);
     }
     place_popup(p, cursor_x, cursor_y, MENU_WIDTH);
+    p->choice = -1;
+    show_popup(0);
+}
+
+// A window's taskbar button's: what can be done with the window from there.
+static void toggle_maximized(struct window *w);
+
+static void open_window_menu(struct window *w) {
+    struct popup *p = &popups[0];
+
+    close_panel();
+    close_menu();
+    menu_window = w;
+    p->count = 0;
+    add_item(p, w->minimized ? ACT_WIN_SHOW : ACT_WIN_MINIMIZE, w->minimized ? "Restore" : "Minimize", NULL, NULL);
+    if (!w->bare)
+        add_item(p, ACT_WIN_MAXIMIZE, w->tiled ? "Restore size" : "Maximize", NULL, NULL);
+    add_item(p, ACT_LINE, "", NULL, NULL);
+    add_item(p, ACT_WIN_CLOSE, "Close", NULL, NULL);
+    place_popup(p, cursor_x, 0, MENU_WIDTH);
+    p->r.y = beside_bar(p->r.height);
     p->choice = -1;
     show_popup(0);
 }
@@ -5158,11 +5514,41 @@ static void act(const struct item *item) {
         put_path(popup_file, item->action == ACT_CUT);
         break;
     case ACT_RENAME:
+        start_desktop_rename(strrchr(popup_file, '/') + 1);
+        break;
     case ACT_PROPERTIES:
-        files_with(item->action == ACT_RENAME ? "--rename" : "--properties", popup_file);
+        files_with("--properties", popup_file);
         break;
     case ACT_DELETE:
         trash_file(popup_file);
+        break;
+    case ACT_NEW_FOLDER:
+    case ACT_NEW_FILE:
+        desktop_new(item->action == ACT_NEW_FOLDER);
+        break;
+    case ACT_SETTINGS: {
+        char settings_app[GUI_PATH_MAX];
+
+        if (gui_app_path("settings", settings_app))
+            start(settings_app, NULL, NULL);
+        break;
+    }
+    case ACT_WIN_SHOW:
+    case ACT_WIN_MINIMIZE:
+    case ACT_WIN_MAXIMIZE:
+    case ACT_WIN_CLOSE:
+        if (!menu_window)
+            break;
+        printf("wm: %s from its taskbar button\n", item->label);
+        if (item->action == ACT_WIN_SHOW)
+            show(menu_window);
+        else if (item->action == ACT_WIN_MINIMIZE)
+            minimize(menu_window);
+        else if (item->action == ACT_WIN_MAXIMIZE) {
+            show(menu_window);
+            toggle_maximized(menu_window);
+        } else
+            send_to(menu_window, (struct gui_message){.type = GUI_CLOSE});
         break;
     case ACT_REFRESH:
         load_desktop(true);
@@ -5378,8 +5764,17 @@ static void press_here(uint32_t changed) {
     if (bar_visible() && contains(taskbar(), cursor_x, cursor_y)) {
         if (changed & MOUSE_BUTTON_LEFT)
             taskbar_click();
-        else if (changed & MOUSE_BUTTON_RIGHT)
-            open_taskbar_menu();
+        else if (changed & MOUSE_BUTTON_RIGHT) {
+            struct window *list[MAX_WINDOWS], *on = NULL;
+            int count = windows_by_age(list);
+
+            for (int i = 0; i < count; i++)
+                on = contains(taskbar_button(i, count), cursor_x, cursor_y) ? list[i] : on;
+            if (on)
+                open_window_menu(on);
+            else
+                open_taskbar_menu();
+        }
         return;
     }
     if (!w) {
@@ -5538,6 +5933,13 @@ static void handle_mouse(const struct mouse_event *e) {
         damage_cursor();
     }
     buttons = e->buttons;
+    if (auth_shown) {
+        auth_mouse(pressed, moved);
+        return;
+    }
+    if (desktop_renaming[0] && pressed && (renamed_index() < 0 || !contains(rename_field(renamed_index()), cursor_x, cursor_y)))
+        desktop_rename_done(true); // a click elsewhere keeps it, then does what it would
+
     if (choosing.pixels) {
         choose_with_mouse(pressed, released, moved);
         return;
@@ -5775,11 +6177,21 @@ static void update_cursor(void) {
 // and the power button asks what to do, or suspends from the lock screen. Swipes
 // of three fingers go to the workspace either side, or show the overview.
 static bool laptop_key(const struct key_event *e) {
-    if (e->code == KEY_LID || e->code == KEY_POWER) {
-        if (e->pressed && (e->code == KEY_LID || locked))
+    if (e->code == KEY_LID || e->code == KEY_POWER) { // as the settings say
+        int does = e->code == KEY_LID ? settings.lid : settings.power_button;
+
+        if (!e->pressed)
+            return true;
+        if (e->code == KEY_LID ? does == GUI_LID_SUSPEND : does == GUI_POWER_SUSPEND || (does == GUI_POWER_ASK && locked))
             suspend_soon();
-        else if (e->pressed)
+        else if (e->code == KEY_LID && does == GUI_LID_LOCK && !locked)
+            lock();
+        else if (e->code == KEY_POWER && does == GUI_POWER_ASK)
             open_power_menu();
+        else if (e->code == KEY_POWER && does == GUI_POWER_OFF && fork() == 0) {
+            execlp("systemctl", "systemctl", "poweroff", (char *)NULL);
+            _exit(127);
+        }
     } else if (e->code == KEY_BRIGHTNESS_UP || e->code == KEY_BRIGHTNESS_DOWN) {
         if (e->pressed && backlight[0])
             step_brightness(e->code == KEY_BRIGHTNESS_UP ? 1 : -1);
@@ -5817,6 +6229,14 @@ static void handle_key(const struct key_event *e) {
     }
     if (laptop_key(e))
         return;
+    if (auth_shown) {
+        auth_key(e);
+        return;
+    }
+    if (desktop_renaming[0] && !locked) {
+        desktop_rename_key(e);
+        return;
+    }
     if (locked) {
         if (focused && focused->login)
             send_to(focused, (struct gui_message){.type = GUI_KEY, .key = *e});
@@ -6146,15 +6566,18 @@ int main(int argc, char **argv) {
     snprintf(shown_clock, sizeof(shown_clock), "%s", clock_text(clock));
     if (!network_open())
         printf("wm: no D-Bus, so no network\n");
+    if (!login_mode && !polkit_open())
+        printf("wm: no polkit agent, so apps can't ask for an admin's password\n");
     find_backlight();
     check_battery();
     report_tray();
     while (!quitting) {
-        struct pollfd fds[2 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
-        struct pollfd *input = fds + 2;
-        int network_wait, fd_count = 2 + display->poll_fds(input);
+        struct pollfd fds[4 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
+        struct pollfd *input = fds + 4;
+        int network_wait, polkit_wait, fd_count = 4 + display->poll_fds(input);
 
         network_poll(&fds[1], &network_wait);
+        polkit_poll(&fds[2], &polkit_wait);
 
         int preview = check_preview(); // before the flyouts, so their own start moving
         int layout_wait = check_layouts();
@@ -6162,6 +6585,7 @@ int main(int argc, char **argv) {
         int notice = expire_notices(); // before drawing, so those that went are gone
 
         redraw();
+        report_taskbar();
 
         // The clock changes at the start of each minute, fading shadows each frame, and
         // the network's looked at every NET_CHECK_MS.
@@ -6195,6 +6619,7 @@ int main(int argc, char **argv) {
 
         timeout = display->max_wait >= 0 && (timeout < 0 || timeout > display->max_wait) ? display->max_wait : timeout;
         timeout = network_wait >= 0 && (timeout < 0 || network_wait < timeout) ? network_wait : timeout;
+        timeout = polkit_wait >= 0 && (timeout < 0 || polkit_wait < timeout) ? polkit_wait : timeout;
 
         int ready = poll(fds, fd_count, timeout);
 
@@ -6220,6 +6645,8 @@ int main(int argc, char **argv) {
         snprintf(was_joining, sizeof(was_joining), "%s", net->joining);
         if (network_read(&joined))
             network_changed(was_joining, joined);
+        if (polkit_read())
+            auth_changed();
 
         if (display->read(input, &output, &(struct input){handle_mouse, handle_key, quit}))
             fit_screen();

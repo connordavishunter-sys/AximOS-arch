@@ -124,6 +124,13 @@ void gui_settings_load(struct gui_settings *s) {
             s->blur = strcmp(value, "off") != 0;
         else if (sscanf(line, "scale %d", &width) == 1 && width >= 1 && width <= 2)
             s->scale = width;
+        else if (sscanf(line, "lid %31s", value) == 1) {
+            for (int i = 0; i < GUI_LIDS; i++)
+                s->lid = !strcmp(value, gui_lid_names[i]) ? i : s->lid;
+        } else if (sscanf(line, "power %31s", value) == 1) {
+            for (int i = 0; i < GUI_POWERS; i++)
+                s->power_button = !strcmp(value, gui_power_names[i]) ? i : s->power_button;
+        }
         else if (sscanf(line, "corners %d", &s->corners) == 1)
             s->corners = s->corners < 0 ? 0 : s->corners > GUI_MAX_RADIUS ? GUI_MAX_RADIUS : s->corners;
         else if (sscanf(line, "app %15s %31s", kind, value) == 2) {
@@ -159,8 +166,12 @@ bool gui_settings_save(const struct gui_settings *s) {
             s->transparency ? "on" : "off", s->blur ? "on" : "off", s->corners);
     if (s->scale)
         fprintf(f, "scale %d\n", s->scale);
+    fprintf(f, "lid %s\npower %s\n", gui_lid_names[s->lid], gui_power_names[s->power_button]);
     return fclose(f) == 0;
 }
+
+const char *const gui_lid_names[GUI_LIDS] = {"suspend", "lock", "nothing"};
+const char *const gui_power_names[GUI_POWERS] = {"ask", "suspend", "off", "nothing"};
 
 const char *const gui_kinds[GUI_KINDS] = {"folder", "picture", "sound", "page", "text"};
 

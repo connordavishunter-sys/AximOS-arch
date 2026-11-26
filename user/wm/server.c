@@ -54,6 +54,7 @@
 #define WHEEL_STEP 15 // how far a notch of the wheel scrolls, in Wayland's units
 #define CLIPBOARD_MAX (64 * 1024 * 1024)
 #define TEXT_TYPE "text/plain;charset=utf-8"
+#define URI_TYPE "text/uri-list"
 #define IMAGE_TYPE "image/png"
 
 struct surface {
@@ -118,6 +119,7 @@ static struct server {
     struct wl_event_source *reading;
     int read_fd;
     char *read_data;
+    bool read_drop; // what's read is a dragged file's URI, dropped on the desktop
     size_t read_length;
     bool read_image;
 } server;
@@ -481,7 +483,10 @@ static void on_map(struct wl_listener *l, void *data) {
     wm_window_title(s->window, title_of(s));
     wm_window_app(s->window, app_of(s));
     gather(s, NULL);
-    printf("wm: %s opened a window, %dx%d\n", app_of(s), s->width, s->height);
+    int at_x, at_y;
+
+    wm_window_position(s->window, &at_x, &at_y);
+    printf("wm: %s opened a window, %dx%d at %d %d\n", app_of(s), s->width, s->height, at_x, at_y);
 }
 
 static void on_unmap(struct wl_listener *l, void *data) {
@@ -1078,6 +1083,7 @@ void server_set_clipboard(const char *data, size_t length, int width, int height
 }
 
 static void stop_reading(void) {
+    server.read_drop = false;
     if (server.reading)
         wl_event_source_remove(server.reading);
     if (server.read_fd >= 0)
@@ -1089,13 +1095,37 @@ static void stop_reading(void) {
     server.read_length = 0;
 }
 
+// The first file of a list of URIs, as a path, undoing %-escapes, or false.
+static bool first_path(const char *uris, char path[GUI_PATH_MAX]) {
+    const char *at = strncmp(uris, "file://", 7) ? NULL : strchr(uris + 7, '/');
+    size_t n = 0;
+
+    for (; at && *at && *at != '\r' && *at != '\n' && n < GUI_PATH_MAX - 1; at++) {
+        unsigned value;
+
+        if (*at == '%' && sscanf(at + 1, "%2x", &value) == 1)
+            path[n++] = (char)value, at += 2;
+        else
+            path[n++] = *at;
+    }
+    path[n] = '\0';
+    return n > 0;
+}
+
 static void finish_reading(void) {
     struct gui_image image;
-    char *data = server.read_data;
+    char *data = server.read_data, path[GUI_PATH_MAX];
     size_t length = server.read_length;
+    bool drop = server.read_drop;
 
     server.read_data = NULL;
     stop_reading();
+    if (drop) {
+        if (data && first_path(data, path))
+            wm_desktop_drop(path);
+        free(data);
+        return;
+    }
     if (!server.read_image) {
         wm_clipboard_changed(data, length, 0, 0);
         return;
@@ -1157,6 +1187,20 @@ static void on_set_selection(struct wl_listener *l, void *data) {
         return;
     wlr_data_source_send(source, server.read_image ? IMAGE_TYPE : offers(source, TEXT_TYPE) ? TEXT_TYPE : "text/plain",
                          pipe_fds[1]);
+    server.read_fd = pipe_fds[0];
+    server.reading = wl_event_loop_add_fd(server.loop, pipe_fds[0], WL_EVENT_READABLE, on_readable, NULL);
+}
+
+// A drag let go of over the desktop, which no app takes, so wm reads which file it
+// was, without waiting for the app, which is told only after.
+static void read_drop(struct wlr_data_source *source) {
+    int pipe_fds[2];
+
+    if (!source || !offers(source, URI_TYPE) || pipe2(pipe_fds, O_CLOEXEC | O_NONBLOCK) < 0)
+        return;
+    stop_reading();
+    wlr_data_source_send(source, URI_TYPE, pipe_fds[1]);
+    server.read_drop = true;
     server.read_fd = pipe_fds[0];
     server.reading = wl_event_loop_add_fd(server.loop, pipe_fds[0], WL_EVENT_READABLE, on_readable, NULL);
 }
@@ -1297,6 +1341,13 @@ static void on_button(struct wl_listener *l, void *data) {
 
     (void)l;
     if (server.seat->drag) { // the drag's own grab drops it, when it's let go
+        struct wlr_box box;
+        int sx, sy;
+
+        wlr_output_layout_get_box(server.layout, server.output, &box);
+        if (e->state == WL_POINTER_BUTTON_STATE_RELEASED
+            && !wm_surface_at((int)(server.cursor->x - box.x), (int)(server.cursor->y - box.y), &sx, &sy))
+            read_drop(server.seat->drag->source);
         wlr_seat_pointer_notify_button(server.seat, e->time_msec, e->button, e->state);
         wlr_seat_pointer_notify_frame(server.seat);
     }

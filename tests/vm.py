@@ -150,8 +150,14 @@ class VM:
         wayland = re.findall(r'wm: apps connect to (\S+)', log)[-1]
         x = re.findall(r'wm: X apps connect to (\S+)', log)[-1]
         uid = self.run(f'id -u {USER}')
-        env = f'WAYLAND_DISPLAY={wayland} DISPLAY={x} XDG_RUNTIME_DIR=/run/user/{uid}'
-        self.run(f'(runuser -u {USER} -- env {env} sh -c {shlex.quote("cd; " + command)} >/dev/null 2>&1 &)', 5)
+        env = f'HOME=/home/{USER} WAYLAND_DISPLAY={wayland} DISPLAY={x} XDG_RUNTIME_DIR=/run/user/{uid}'
+        # In the session's own cgroup, so logind and polkit take it as the session's, as
+        # it is when wm starts it, with wm as its polkit agent.
+        session = self.run(f'loginctl show-user {USER} -p Display --value')
+        scope = self.run(f'loginctl show-session {session} -p Scope --value')
+        join = f'echo $$ > /sys/fs/cgroup/user.slice/user-{uid}.slice/{scope}/cgroup.procs 2>/dev/null; ' if scope else ''
+        start = f'{join}exec runuser -u {USER} -- env {env} sh -c {shlex.quote("cd; " + command)}'
+        self.run(f'(sh -c {shlex.quote(start)} >/dev/null 2>&1 &)', 5)
 
     def command(self, line):
         """Runs a QEMU monitor command, without waiting for it to finish."""

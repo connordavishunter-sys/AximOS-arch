@@ -17,7 +17,6 @@
 #define MAX_APPS 32
 #define LIST "##entries"
 #define ADDRESS "##folder"
-#define ANSWER "##answer"
 #define SEARCH "Search##search"
 #define PLACES "##places"
 #define PLACE_COUNT 7
@@ -99,9 +98,13 @@ static char dropped[PATH_MAX];
 static bool drop_copies;
 
 // What the strip under the address bar, or a dialog, is asking, if anything.
-static enum { NOTHING, RENAMING, NEW_FOLDER, NEW_FILE, OPENING_WITH, DELETING, EMPTYING, PROPERTIES } asking;
-static char answer[NAME_MAX + 1];
-static bool ask_focus; // the answer box gets the keyboard
+static enum { NOTHING, RENAMING, OPENING_WITH, DELETING, EMPTYING, PROPERTIES } asking;
+
+// What's being renamed where its name's shown, by the name it had, and what it's
+// being called, and whether the box has just opened.
+static char renaming[NAME_MAX + 1], new_name[NAME_MAX + 1];
+static bool rename_started;
+static bool ask_focus; // the app's dropdown gets the keyboard
 
 // The apps, for Open with.
 static char app_names[MAX_APPS][32];
@@ -260,7 +263,7 @@ static void name_shown(struct entry *e) {
     else if (in_recent())
         snprintf(e->shown, sizeof(e->shown), "%s", strrchr(e->name, '/') + 1);
     else
-        snprintf(e->shown, sizeof(e->shown), "%s", e->name);
+        memcpy(e->shown, e->name, sizeof(e->shown));
 }
 
 static bool listed(const char *select);
@@ -499,10 +502,21 @@ static void open_selected(void) {
         open_in(gui_app_for(path));
 }
 
+static void start_renaming(void) {
+    if (!can_rename() || in_trash())
+        return;
+    snprintf(renaming, sizeof(renaming), "%s", chosen()->name);
+    snprintf(new_name, sizeof(new_name), "%s", chosen()->name);
+    rename_started = true;
+    printf("files: renaming %s\n", renaming);
+    gui_post(&(struct gui_message){.type = GUI_REDRAW});
+}
+
 static void ask_about(int what) {
+    if (what == RENAMING)
+        return start_renaming();
     asking = what;
     ask_focus = true;
-    snprintf(answer, sizeof(answer), "%s", what == RENAMING ? chosen()->name : "");
     app_chosen = 0;
     gui_post(&(struct gui_message){.type = GUI_REDRAW}); // with the strip or dialog asking
 }
@@ -676,37 +690,56 @@ static void dispose(int how) {
         read_folder(folder, NULL);
 }
 
-// Does what the strip asked with the name it was given.
+// Opens what's chosen in the app the strip was given.
 static void answered(void) {
-    char path[PATH_MAX], from[PATH_MAX];
-    int fd = -1;
+    asking = NOTHING;
+    if (app_count)
+        open_in(apps[app_chosen]);
+}
 
-    if (asking == OPENING_WITH) {
-        asking = NOTHING;
-        if (app_count)
-            open_in(apps[app_chosen]);
+// The rename, once it's said to be done, if the name's changed.
+static void renamed(void) {
+    char from[PATH_MAX], to[PATH_MAX];
+
+    if (!strcmp(new_name, renaming) || !new_name[0])
+        ;
+    else if (strchr(new_name, '/'))
+        snprintf(status, sizeof(status), "A name can't have a / in it");
+    else if (path_of(to, new_name), !access(to, F_OK))
+        snprintf(status, sizeof(status), "There's already something called %s", new_name);
+    else if (path_of(from, renaming), rename(from, to) < 0)
+        snprintf(status, sizeof(status), "Can't rename %s: %s", renaming, strerror(errno));
+    else {
+        printf("files: renamed %s to %s\n", from, to);
+        renaming[0] = '\0';
+        read_folder(folder, new_name);
         return;
     }
-    if (!answer[0] || strchr(answer, '/')) {
-        snprintf(status, sizeof(status), "Type a name, without a /");
-        return;
-    }
-    path_of(path, answer);
-    if (asking == RENAMING) {
-        path_of(from, chosen()->name);
-        if (rename(from, path) < 0) {
-            snprintf(status, sizeof(status), "Can't rename %s: %s", chosen()->name, strerror(errno));
+    renaming[0] = '\0';
+}
+
+// A new folder or empty file, called what's free of "New folder", "New folder 2" and
+// on, then renamed in place, as Windows does.
+static void make_new(bool is_folder) {
+    char name[NAME_MAX + 1], path[PATH_MAX];
+    int fd;
+
+    for (int n = 1; n < 1000; n++) {
+        if (is_folder)
+            snprintf(name, sizeof(name), n > 1 ? "New folder %d" : "New folder", n);
+        else
+            snprintf(name, sizeof(name), n > 1 ? "New file %d.txt" : "New file.txt", n);
+        path_of(path, name);
+        if (is_folder ? mkdir(path, 0755) == 0 : (fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) >= 0 && close(fd) == 0) {
+            printf("files: made %s\n", path);
+            read_folder(folder, name);
+            start_renaming();
             return;
         }
-        printf("files: renamed %s to %s\n", from, path);
-    } else if (asking == NEW_FOLDER ? mkdir(path, 0755) < 0
-                                    : (fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0 || close(fd) < 0) {
-        snprintf(status, sizeof(status), "Can't make %s: %s", answer, strerror(errno));
-        return;
-    } else {
-        printf("files: made %s\n", path);
+        if (errno != EEXIST)
+            break;
     }
-    read_folder(folder, answer);
+    snprintf(status, sizeof(status), "Can't make a new %s: %s", is_folder ? "folder" : "file", strerror(errno));
 }
 
 // Says where a widget is when that changes, for the tests to find it.
@@ -791,31 +824,23 @@ static void sidebar(struct gui_ui *ui) {
     gui_column_end(ui);
 }
 
-// Asks for a name, or the app to open something with, under the address bar.
+// Asks for the app to open something with, under the address bar.
 static void asking_strip(struct gui_ui *ui) {
-    static const char *const questions[] = {
-        [RENAMING] = "Rename to", [NEW_FOLDER] = "New folder", [NEW_FILE] = "New file", [OPENING_WITH] = "Open with",
-    };
     bool yes, no;
 
     if (ask_focus)
-        gui_set_focus(ui, asking == OPENING_WITH ? "##app" : ANSWER, answer);
+        gui_set_focus(ui, "##app", NULL);
     ask_focus = false;
-    gui_label(ui, "%s:", questions[asking]);
+    gui_label(ui, "Open with:");
     gui_same_line(ui);
-    yes = gui_button(ui, asking == OPENING_WITH ? "Open" : "OK");
+    yes = gui_button(ui, "Open");
     report(ui, 8, "ok");
     gui_same_line(ui);
     no = gui_button(ui, "Cancel");
     gui_same_line(ui);
-    if (asking == OPENING_WITH) {
-        gui_dropdown(ui, "##app", apps, app_count, &app_chosen);
-        report(ui, 6, "app");
-        yes |= gui_focused(ui, "##app") && gui_key(ui, KEY_ENTER) && !ui->popup;
-    } else {
-        gui_textbox(ui, ANSWER, answer, sizeof(answer));
-        yes |= gui_focused(ui, ANSWER) && gui_key(ui, KEY_ENTER);
-    }
+    gui_dropdown(ui, "##app", apps, app_count, &app_chosen);
+    report(ui, 6, "app");
+    yes |= gui_focused(ui, "##app") && gui_key(ui, KEY_ENTER) && !ui->popup;
     if (no || gui_key(ui, KEY_ESCAPE))
         asking = NOTHING;
     else if (yes)
@@ -995,9 +1020,9 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
             refresh();
     } else {
         if (gui_menu_item(ui, "New folder"))
-            ask_about(NEW_FOLDER);
+            make_new(true);
         if (gui_menu_item(ui, "New file"))
-            ask_about(NEW_FILE);
+            make_new(false);
         if (gui_menu_item(ui, "Paste"))
             paste();
         gui_menu_separator(ui);
@@ -1016,7 +1041,7 @@ static void list_keys(struct gui_ui *ui) {
 
     for (int i = 0; i < ui->key_count; i++)
         shift |= ui->keys[i].code == KEY_DELETE && (ui->keys[i].modifiers & KEY_MOD_SHIFT);
-    if (!gui_focused(ui, LIST) || asking)
+    if (!gui_focused(ui, LIST) || asking || renaming[0])
         return;
     if (gui_key(ui, KEY_BACKSPACE))
         go_up();
@@ -1066,7 +1091,7 @@ static void frame(struct gui_ui *ui) {
         dialogs(ui);
     else
         gui_help(ui, help);
-    if (gui_shortcut(ui, 'h'))
+    if (gui_shortcut(ui, 'h') && !renaming[0])
         toggle_hidden();
     result = gui_tabs(ui, tab_names, tab_count, &active, &closing);
     if (result == GUI_TABS_CHANGED) {
@@ -1089,8 +1114,31 @@ static void frame(struct gui_ui *ui) {
     sidebar(ui);
 
     gui_list_marks(ui, marked);
+    for (int i = 0; renaming[0] && i <= count; i++) { // where it is now, as the list can change
+        if (i == count)
+            renaming[0] = '\0';
+        else if (!strcmp(entries[i].name, renaming)) {
+            if (rename_started) {
+                gui_edit_name(ui, new_name, entries[i].folder);
+                gui_set_focus(ui, LIST, NULL);
+                rename_started = false;
+            }
+            gui_list_edit(ui, i, new_name, sizeof(new_name));
+            break;
+        }
+    }
     result = grid ? gui_grid(ui, LIST, items, pictures, count, &selected)
                   : gui_list_icons(ui, LIST, items, icons, count, &selected, 0);
+    if (renaming[0]) {
+        int edited = gui_edit_result(ui);
+
+        if (edited == GUI_EDIT_DONE)
+            renamed();
+        else if (edited == GUI_EDIT_CANCELLED)
+            renaming[0] = '\0';
+        if (edited)
+            gui_post(&(struct gui_message){.type = GUI_REDRAW});
+    }
 
     struct gui_rect list = gui_last_rect(ui);
 
@@ -1098,7 +1146,7 @@ static void frame(struct gui_ui *ui) {
     drag(ui, list);
     if (result == GUI_LIST_ACTIVATED)
         open_selected();
-    else if (result == GUI_LIST_CHANGED && (asking == RENAMING || asking == OPENING_WITH))
+    else if (result == GUI_LIST_CHANGED && asking == OPENING_WITH)
         asking = NOTHING; // they were about the one that was selected
     if (result)
         describe();

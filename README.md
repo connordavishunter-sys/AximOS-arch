@@ -23,9 +23,14 @@ screens 2560 wide or more, everything's drawn at 2x, at the screen's own resolut
 wm, libgui's apps, whose canvases are laid out as at 1x and drawn twice as sharp, and
 Wayland apps such as foot, at their own 2x. X apps draw at 1x, made twice the size.
 The live ISO's installer, in System, puts AximOS on a drive: in place of an AximOS
-already on it, in its free space, or over the whole of it.
+already on it, in its free space, or over the whole of it. Settings is the system's
+front end: its Network, Power, Date & time and About pages are NetworkManager's,
+UPower's and power-profiles-daemon's, timedated's and hostnamed's, and wm asks for an
+admin's password, as polkit's agent, when a change needs one. Taskbar buttons have a
+menu, the desktop's makes new folders and files and opens Settings, and things are
+renamed where their names are, on the desktop and in Files.
 
-Still to come: Settings as a front end for NetworkManager, UPower and timedated; dragging
+Still to come: updating an installed system; dragging
 files between wm's desktop and apps; and screens beyond the first.
 
 ## How it fits together
@@ -51,6 +56,10 @@ files between wm's desktop and apps; and screens beyond the first.
 - **The network** (`user/wm/network.c`) is NetworkManager's, over D-Bus with sd-bus, on
   wm's own poll loop. Networks joined from the panel belong to whoever's logged in, as
   NetworkManager lets them make those without an admin's password.
+- **Admin rights** come from polkit, whose agent wm is (`user/wm/polkit.c`): it
+  shows its own dialog for the password, which polkit's helper checks, through its
+  socket. Settings' system pages (`user/settings/system.c`) ask for what needs it
+  as interactive, so polkit asks wm, and the network's is wm's own `network.c`.
 - **Installing**: the installer (`user/installer`) asks which drive, how, the first
   account, the computer's name and the time zone, then runs `aximos-install`
   (`system/aximos-install`) as root. That copies the live system onto an ext4 root,

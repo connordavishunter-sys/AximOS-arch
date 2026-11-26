@@ -250,7 +250,13 @@ struct gui_settings {
                         // smaller ones, like buttons', rounded in proportion
     int scale;          // 1 or 2 screen pixels to each of the desktop's, or 0 for 2 on screens
                         // GUI_SCALE_WIDTH wide or more, and 1 on smaller ones
+    int lid;            // what closing a laptop's lid does: one of GUI_LID_
+    int power_button;   // and pressing its power button: one of GUI_POWER_
 };
+
+enum { GUI_LID_SUSPEND, GUI_LID_LOCK, GUI_LID_NOTHING, GUI_LIDS };
+enum { GUI_POWER_ASK, GUI_POWER_SUSPEND, GUI_POWER_OFF, GUI_POWER_NOTHING, GUI_POWERS };
+extern const char *const gui_lid_names[GUI_LIDS], *const gui_power_names[GUI_POWERS]; // as the settings say them
 
 #define GUI_SCALE_WIDTH 2560
 
@@ -469,6 +475,11 @@ struct gui_ui {
 
     // The item in a list the last right-click was on, or -1 if none was.
     int clicked_item;
+
+    // The item the next list or grid is renaming in place, as gui_list_edit says.
+    int edit_index, edit_result;
+    char *edit_text;
+    size_t edit_size;
     struct key_event menu_keys[GUI_UI_MAX_KEYS];
     int menu_key_count;
 
@@ -587,6 +598,16 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
 // double-clicked or Enter is pressed on it.
 enum { GUI_LIST_CHANGED = 1, GUI_LIST_ACTIVATED };
 int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows);
+
+// Renaming an item in place, as Windows does: gui_edit_name starts, selecting the
+// name but for its extension, then each frame gui_list_edit says which item of the
+// next list or grid is being renamed, which shows a box where its name was that
+// typing changes. gui_edit_result says, after the list, whether Enter or a click
+// elsewhere has said it's done, or Escape that it isn't, or neither yet.
+enum { GUI_EDITING, GUI_EDIT_DONE, GUI_EDIT_CANCELLED };
+void gui_edit_name(struct gui_ui *ui, char *text, bool folder);
+void gui_list_edit(struct gui_ui *ui, int index, char *text, size_t size);
+int gui_edit_result(struct gui_ui *ui);
 
 // The next list or grid lets several items be chosen, which marks says, as long
 // as it: Ctrl+click adds or takes one away, Shift+click those from the selected

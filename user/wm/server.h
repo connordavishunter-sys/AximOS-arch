@@ -39,6 +39,9 @@ void wm_login_gone(void);       // and it's stopped
 // What's on the clipboard now, text, or a picture width by height, which wm keeps.
 void wm_clipboard_changed(char *data, size_t length, int width, int height);
 
+// A file an app dragged, let go of over the desktop, which copies it there.
+void wm_desktop_drop(const char *path);
+
 // The window at a point on the desktop, for dragging and dropping.
 struct surface *wm_surface_at(int x, int y, int *inside_x, int *inside_y);
 

@@ -1,3 +1,6 @@
+#include "network.h"
+#include "system.h"
+#include <arpa/inet.h>
 #include <aximos.h>
 #include <audio.h>
 #include <dirent.h>
@@ -22,8 +25,9 @@
 #define MAX_APPS 32
 #define TEST_SOUND GUI_SHARE "/example_music/1.wav"
 
-enum { APPEARANCE, DISPLAY, KEYBOARD, TIME, SOUND, APPS, TASKBAR, TABS };
-static const char *const tabs[] = {"Appearance", "Display", "Keyboard", "Date & time", "Sound", "Apps", "Taskbar"};
+enum { NETWORK, APPEARANCE, DISPLAY, SOUND, POWER, KEYBOARD, TIME, APPS, TASKBAR, ABOUT, TABS };
+static const char *const tabs[] = {"Network", "Appearance", "Display", "Sound",   "Power",
+                                   "Keyboard", "Date & time", "Apps",   "Taskbar", "About"};
 static const char *const kind_names[GUI_KINDS] = {"Folders", "Pictures", "Sounds", "Web pages", "Other files"};
 
 // The apps there are, to open each kind of file in.
@@ -92,8 +96,8 @@ static void filter(void) {
 }
 
 static void set_zone(const char *name) {
-    if (!gui_time_zone_set(name)) {
-        snprintf(status, sizeof(status), "Couldn't set the time zone to %s", name);
+    if (!clock_set_zone(name)) {
+        snprintf(status, sizeof(status), "Couldn't set the time zone to %s: %s", name, system_error());
         return;
     }
     snprintf(zone, sizeof(zone), "%s", name);
@@ -207,7 +211,7 @@ static void screen_changed(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[41 + MAX_WALLPAPERS];
+    static struct gui_rect places[80]; // the wallpapers from 41, the system pages' from 62
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -233,19 +237,19 @@ static void appearance(struct gui_ui *ui) {
         snprintf(what, sizeof(what), "accent %s", gui_accent_names[accent]);
         save(what);
     }
-    report(ui, 24, "accent");
+    report(ui, 64, "accent");
     if (gui_checkbox(ui, "Window shadows", &settings.shadows))
         save(settings.shadows ? "shadows on" : "shadows off");
     report(ui, 1, "shadows");
     if (gui_checkbox(ui, "Animations", &settings.animations))
         save(settings.animations ? "animations on" : "animations off");
-    report(ui, 30, "animations");
+    report(ui, 70, "animations");
     if (gui_checkbox(ui, "Transparency", &settings.transparency))
         save(settings.transparency ? "transparency on" : "transparency off");
-    report(ui, 33, "transparency");
+    report(ui, 73, "transparency");
     if (gui_checkbox(ui, "Blur behind see-through things", &settings.blur))
         save(settings.blur ? "blur on" : "blur off");
-    report(ui, 34, "blur");
+    report(ui, 74, "blur");
     gui_label(ui, "Corners, from square to round:");
     if (gui_slider(ui, "##corners", &settings.corners, 0, GUI_MAX_RADIUS)) {
         char what[32];
@@ -253,7 +257,7 @@ static void appearance(struct gui_ui *ui) {
         snprintf(what, sizeof(what), "corners %d", settings.corners);
         save(what);
     }
-    report(ui, 35, "corners");
+    report(ui, 75, "corners");
 
     bool smooth = !settings.sharp_text;
 
@@ -296,13 +300,13 @@ static void night_light(struct gui_ui *ui) {
     gui_heading(ui, "Night light");
     if (gui_checkbox(ui, "Less blue light", &settings.night_light))
         save(settings.night_light ? "night light on" : "night light off");
-    report(ui, 25, "night");
+    report(ui, 65, "night");
     gui_label(ui, "How much less:");
     if (gui_slider(ui, "##strength", &settings.night_strength, 10, 100)) {
         snprintf(what, sizeof(what), "night strength %d", settings.night_strength);
         save(what);
     }
-    report(ui, 26, "strength");
+    report(ui, 66, "strength");
 }
 
 // Where the taskbar goes, whether it hides, and whether the desktop has icons.
@@ -314,15 +318,15 @@ static void taskbar(struct gui_ui *ui) {
         settings.taskbar_top = top;
         save(top ? "taskbar top" : "taskbar bottom");
     }
-    report(ui, 27, "position");
+    report(ui, 67, "position");
     if (gui_checkbox(ui, "Hide the taskbar until the mouse goes to it", &settings.autohide))
         save(settings.autohide ? "autohide on" : "autohide off");
-    report(ui, 28, "autohide");
+    report(ui, 68, "autohide");
     if (gui_checkbox(ui, "Icons on the desktop", &icons)) {
         settings.hide_icons = !icons;
         save(icons ? "icons shown" : "icons hidden");
     }
-    report(ui, 29, "icons");
+    report(ui, 69, "icons");
 }
 
 // How big everything on the screen is: 2x draws each pixel as four.
@@ -333,7 +337,7 @@ static void scale(struct gui_ui *ui) {
         settings.scale = at + 1;
         save(at ? "scale 2x" : "scale 1x");
     }
-    report(ui, 36, "scale");
+    report(ui, 76, "scale");
 }
 
 static void display(struct gui_ui *ui) {
@@ -372,6 +376,326 @@ static void display(struct gui_ui *ui) {
     night_light(ui);
 }
 
+// Setting the clock: from the network, or by hand, as timedated does it.
+static struct clock_state clock_now;
+static char set_date[16], set_time[8];
+
+static void automatic_time(struct gui_ui *ui) {
+    bool ntp = clock_now.ntp;
+
+    if (clock_now.can_ntp && gui_checkbox(ui, "Set the time from the network", &ntp)) {
+        if (clock_set_ntp(ntp))
+            snprintf(status, sizeof(status), "The time %s", ntp ? "comes from the network" : "is set by hand");
+        else
+            snprintf(status, sizeof(status), "Couldn't change that: %s", system_error());
+        printf("settings: ntp %s: %s\n", ntp ? "on" : "off", status);
+        clock_read(&clock_now);
+    }
+    report(ui, 62, "ntp");
+    if (clock_now.ntp) {
+        gui_label(ui, clock_now.synced ? "It's in step with the network's time." : "It hasn't reached the network's time yet.");
+        return;
+    }
+    if (!set_date[0]) { // now, to change
+        time_t t = time(NULL);
+
+        strftime(set_date, sizeof(set_date), "%Y-%m-%d", localtime(&t));
+        strftime(set_time, sizeof(set_time), "%H:%M", localtime(&t));
+    }
+    gui_label(ui, "The date, as year-month-day, and the time, as hour:minute");
+    gui_textbox(ui, "##date", set_date, sizeof(set_date));
+    report(ui, 63, "date");
+    bool set = gui_button(ui, "Set");
+
+    report(ui, 65, "set");
+    gui_same_line(ui);
+    gui_textbox(ui, "##time", set_time, sizeof(set_time));
+    report(ui, 64, "time");
+    if (set) {
+        struct tm when = {.tm_isdst = -1};
+
+        if (sscanf(set_date, "%d-%d-%d", &when.tm_year, &when.tm_mon, &when.tm_mday) != 3
+            || sscanf(set_time, "%d:%d", &when.tm_hour, &when.tm_min) != 2)
+            snprintf(status, sizeof(status), "That isn't a date and time");
+        else {
+            when.tm_year -= 1900, when.tm_mon -= 1;
+            if (clock_set(mktime(&when)))
+                snprintf(status, sizeof(status), "The time's set");
+            else
+                snprintf(status, sizeof(status), "Couldn't set the time: %s", system_error());
+        }
+        printf("settings: set the time: %s\n", status);
+        gui_settings_changed(); // for the taskbar's clock
+    }
+}
+
+// The network, as NetworkManager has it: Wi-Fi's on or off, the networks nearby,
+// joined, left and forgotten, a hidden one, the cable, and the addresses in use.
+static char chosen_ssid[SSID_MAX], net_password[128], hidden_name[SSID_MAX], hidden_password[128];
+
+static const char *ip(uint32_t address, char out[16]) {
+    struct in_addr a = {address};
+
+    return inet_ntop(AF_INET, &a, out, 16);
+}
+
+static void joining(const char *ssid, const char *password, bool hidden) {
+    if (network_join(ssid, password, hidden))
+        snprintf(status, sizeof(status), "Joining %s...", ssid);
+    else
+        snprintf(status, sizeof(status), "Couldn't join %s: %s", ssid, network_error());
+    printf("settings: %s\n", status);
+}
+
+static void network_cards(struct gui_ui *ui) {
+    DIR *dir = opendir("/sys/class/net");
+    struct dirent *d;
+
+    while (dir && (d = readdir(dir))) {
+        char path[300], mac[32] = "";
+        FILE *f;
+
+        if (d->d_name[0] == '.' || !strcmp(d->d_name, "lo"))
+            continue;
+        snprintf(path, sizeof(path), "/sys/class/net/%s/address", d->d_name);
+        if ((f = fopen(path, "r"))) {
+            if (fgets(mac, sizeof(mac), f))
+                mac[strcspn(mac, "\n")] = '\0';
+            fclose(f);
+        }
+        gui_label(ui, "%s: %s", d->d_name, mac);
+    }
+    if (dir)
+        closedir(dir);
+}
+
+static void network_page(struct gui_ui *ui) {
+    const struct network *n = network_now();
+    char a[16], b[16], c[16];
+    static char labels[WIFI_MAX][SSID_MAX + 48];
+    static const char *items[WIFI_MAX];
+    int at = -1;
+
+    if (!n->running) {
+        gui_label(ui, "NetworkManager isn't running, so there's no network.");
+        return;
+    }
+    if (n->wifi_card) {
+        bool on = n->wifi_on;
+
+        if (gui_checkbox(ui, "Wi-Fi", &on)) {
+            network_set_wifi(on);
+            printf("settings: wifi %s\n", on ? "on" : "off");
+        }
+        report(ui, 66, "wifi");
+    }
+    if (n->cable)
+        gui_label(ui, "Wired, %s: %s", n->wired_name, n->wired ? "connected" : "not connected");
+    if (n->address)
+        gui_label(ui, "Address %s, gateway %s, DNS %s", ip(n->address, a), ip(n->gateway, b), n->dns ? ip(n->dns, c) : "none");
+    else
+        gui_label(ui, "Not connected");
+    gui_label(ui, "%s", status);
+    if (n->wifi_card && n->wifi_on) {
+        gui_separator(ui);
+        for (int i = 0; i < n->wifi_count; i++) {
+            const struct wifi *w = &n->wifi[i];
+
+            snprintf(labels[i], sizeof(labels[i]), "%s - %s, %d%%", w->ssid,
+                     !strcmp(n->joining, w->ssid) ? "joining" : w->active ? "connected" : w->saved ? "saved"
+                     : w->secured ? "secured" : "open", w->strength);
+            items[i] = labels[i];
+            if (!strcmp(w->ssid, chosen_ssid))
+                at = i;
+        }
+        if (gui_list(ui, "##networks", items, n->wifi_count, &at, 6) && at >= 0) {
+            snprintf(chosen_ssid, sizeof(chosen_ssid), "%s", n->wifi[at].ssid);
+            net_password[0] = '\0';
+        }
+        report(ui, 67, "networks");
+        if (gui_button(ui, "Look again"))
+            network_scan();
+        report(ui, 68, "scan");
+        if (at >= 0) {
+            const struct wifi *w = &n->wifi[at];
+
+            gui_same_line(ui);
+            if (w->active && gui_button(ui, "Disconnect"))
+                network_leave();
+            if (w->saved) {
+                if (gui_button(ui, "Forget")) {
+                    network_forget(w->ssid);
+                    snprintf(status, sizeof(status), "Forgot %s", w->ssid);
+                    printf("settings: forgot %s\n", w->ssid);
+                }
+                report(ui, 71, "forget");
+                gui_same_line(ui);
+            }
+            if (!w->active && gui_button(ui, "Connect"))
+                joining(w->ssid, net_password, false);
+            report(ui, 70, "connect");
+            if (!w->active && w->secured && !w->saved) {
+                gui_same_line(ui); // the rest of the line
+                gui_password(ui, "##wifi password", net_password, sizeof(net_password));
+                report(ui, 69, "password");
+            }
+        }
+        gui_label(ui, "A hidden network, by its name and password");
+        gui_textbox(ui, "##hidden name", hidden_name, sizeof(hidden_name));
+        if (gui_button(ui, "Join") && hidden_name[0])
+            joining(hidden_name, hidden_password, true);
+        gui_same_line(ui);
+        gui_password(ui, "##hidden password", hidden_password, sizeof(hidden_password));
+    }
+    gui_separator(ui);
+    gui_label(ui, "Network cards and their addresses");
+    network_cards(ui);
+}
+
+// The battery, what it does to save power, and what the lid and power button do,
+// which wm does as the settings say.
+static struct battery battery;
+static struct power_modes modes;
+
+static const char *mode_name(const char *mode) {
+    return !strcmp(mode, "power-saver") ? "Power saver" : !strcmp(mode, "balanced") ? "Balanced"
+         : !strcmp(mode, "performance") ? "Performance" : mode;
+}
+
+static void power_page(struct gui_ui *ui) {
+    static const char *const lids[GUI_LIDS] = {"Suspends", "Locks the screen", "Does nothing"};
+    static const char *const buttons[GUI_POWERS] = {"Asks what to do", "Suspends", "Powers off", "Does nothing"};
+    int lid = settings.lid, button = settings.power_button;
+
+    if (battery.present) {
+        long minutes = battery.seconds_left / 60;
+
+        gui_label(ui, "Battery: %.0f%%, %s%s", battery.percent, battery.state, minutes ? "," : "");
+        if (minutes) {
+            gui_same_line(ui);
+            gui_label(ui, "%ld h %ld min %s", minutes / 60, minutes % 60, !strcmp(battery.state, "charging") ? "to full" : "left");
+        }
+        gui_progress(ui, battery.percent / 100);
+        if (battery.health > 0)
+            gui_label(ui, "It holds %.0f%% of what it did new%s", battery.health, battery.cycles ? "," : ".");
+        if (battery.health > 0 && battery.cycles) {
+            gui_same_line(ui);
+            gui_label(ui, "after %u charges.", battery.cycles);
+        }
+        if (battery.model[0])
+            gui_label(ui, "%s", battery.model);
+    } else {
+        gui_label(ui, "There's no battery.");
+    }
+    report(ui, 72, "battery");
+    gui_separator(ui);
+    if (modes.available && modes.count) {
+        const char *names[3];
+        int active = 0;
+
+        for (int i = 0; i < modes.count; i++) {
+            names[i] = mode_name(modes.names[i]);
+            active = !strcmp(modes.names[i], modes.active) ? i : active;
+        }
+        gui_label(ui, "Power mode");
+        if (gui_dropdown(ui, "##mode", names, modes.count, &active)) {
+            if (power_mode_set(modes.names[active]))
+                snprintf(status, sizeof(status), "%s", names[active]);
+            else
+                snprintf(status, sizeof(status), "Couldn't change the power mode: %s", system_error());
+            printf("settings: power mode %s\n", modes.names[active]);
+            power_modes_read(&modes);
+        }
+        report(ui, 73, "mode");
+    } else {
+        gui_label(ui, "Power modes need power-profiles-daemon.");
+    }
+    gui_separator(ui);
+    gui_label(ui, "Closing the lid");
+    if (gui_dropdown(ui, "##lid", lids, GUI_LIDS, &lid)) {
+        settings.lid = lid;
+        save(gui_lid_names[lid]);
+    }
+    report(ui, 74, "lid");
+    gui_label(ui, "The power button");
+    if (gui_dropdown(ui, "##power button", buttons, GUI_POWERS, &button)) {
+        settings.power_button = button;
+        save(gui_power_names[button]);
+    }
+    report(ui, 75, "power button");
+    gui_label(ui, "%s", status);
+}
+
+// The computer: its name, which can change, and what it is.
+static struct about about;
+static char new_hostname[64];
+
+static const char *bytes(uint64_t n, char out[16]) {
+    snprintf(out, 16, n >= 1ull << 40 ? "%.1f TiB" : "%.1f GiB", (double)n / (n >= 1ull << 40 ? 1ull << 40 : 1ull << 30));
+    return out;
+}
+
+static void about_page(struct gui_ui *ui) {
+    char a[16], b[16];
+
+    gui_label(ui, "The computer's name");
+    bool rename = gui_button(ui, "Rename");
+
+    report(ui, 77, "rename");
+    gui_same_line(ui); // a text box takes the rest of the line
+    gui_textbox(ui, "##hostname", new_hostname, sizeof(new_hostname));
+    report(ui, 76, "hostname");
+    if (rename) {
+        if (hostname_set(new_hostname)) {
+            snprintf(status, sizeof(status), "It's called %s now", new_hostname);
+            about_read(&about);
+        } else {
+            snprintf(status, sizeof(status), "Couldn't rename it: %s", system_error());
+        }
+        printf("settings: rename: %s\n", status);
+    }
+    gui_label(ui, "%s", status);
+    gui_separator(ui);
+    if (about.model[0] && strcmp(about.model, " "))
+        gui_label(ui, "%s", about.model);
+    gui_label(ui, "%s, %s", about.os, about.kernel);
+    gui_label(ui, "Processor: %s", about.cpu);
+    for (int i = 0; i < about.gpus; i++)
+        gui_label(ui, "Graphics: %s", about.gpu[i]);
+    gui_label(ui, "Memory: %s", bytes(about.memory, a));
+    gui_label(ui, "Disk: %s free of %s", bytes(about.disk_free, a), bytes(about.disk_total, b));
+}
+
+// What a tab shows that's read as it's shown.
+static void read_system(void);
+
+static void entered(void) {
+    printf("settings: tab %s\n", tabs[tab]);
+    status[0] = '\0';
+    if (tab == NETWORK)
+        network_scan();
+    if (tab == ABOUT)
+        about_read(&about), snprintf(new_hostname, sizeof(new_hostname), "%s", about.hostname);
+    read_system();
+}
+
+// What the system pages show, read again each second they're shown.
+static void read_system(void) {
+    int joined;
+
+    network_read(&joined);
+    if (joined)
+        snprintf(status, sizeof(status), joined > 0 ? "Joined" : "Couldn't join: %s", network_error());
+    if (joined)
+        printf("settings: %s\n", status);
+    if (tab == POWER) {
+        battery_read(&battery);
+        power_modes_read(&modes);
+    }
+    if (tab == TIME)
+        clock_read(&clock_now);
+}
+
 static void date_and_time(struct gui_ui *ui) {
     int clock = settings.clock_12_hour;
     char now[32];
@@ -382,6 +706,7 @@ static void date_and_time(struct gui_ui *ui) {
         save(settings.clock_12_hour ? "clock 12" : "clock 24");
     }
     report(ui, 3, "clock");
+    automatic_time(ui);
     gui_separator(ui);
     strftime(now, sizeof(now), settings.clock_12_hour ? "%I:%M %p" : "%H:%M", localtime(&t));
     gui_label(ui, "Time zone: %s, where it's %s", zone, now + (settings.clock_12_hour && now[0] == '0'));
@@ -447,7 +772,7 @@ static void sound(struct gui_ui *ui) {
     if (count > 1) { // each with its own volume, which the slider then shows
         if (gui_dropdown(ui, "Play through", names, count, &which) && audio_set_output(outputs[which].key))
             printf("settings: playing through %s\n", outputs[which].name);
-        report(ui, 37, "output");
+        report(ui, 77, "output");
     }
     gui_label(ui, "How loud everything plays:");
 
@@ -462,11 +787,11 @@ static void sound(struct gui_ui *ui) {
     }
     if (gui_checkbox(ui, "Low latency", &m.low_latency) && audio_set_low_latency(m.low_latency))
         printf("settings: low latency %s\n", m.low_latency ? "on" : "off");
-    report(ui, 32, "low latency");
+    report(ui, 72, "low latency");
     gui_label(ui, "Plays sound in about 5 ms rather than 20, but it can crackle while the computer's busy.");
     if (gui_checkbox(ui, "System sounds", &settings.sounds))
         save(settings.sounds ? "sounds on" : "sounds off");
-    report(ui, 31, "sounds");
+    report(ui, 71, "sounds");
     gui_separator(ui);
     char player[GUI_PATH_MAX];
 
@@ -532,10 +857,8 @@ static void frame(struct gui_ui *ui) {
     gui_tabs(ui, tabs, TABS, &tab, NULL);
     if (keep_left)
         keep_strip(ui);
-    if (tab != was) {
-        printf("settings: tab %s\n", tabs[tab]);
-        status[0] = '\0';
-    }
+    if (tab != was)
+        entered();
     // Pages scroll when the window's too small for them, but for the time zones',
     // whose list goes down to the bottom of the window and scrolls itself.
     bool scrolls = tab != TIME;
@@ -556,6 +879,12 @@ static void frame(struct gui_ui *ui) {
         default_apps(ui);
     else if (tab == TASKBAR)
         taskbar(ui);
+    else if (tab == NETWORK)
+        network_page(ui);
+    else if (tab == POWER)
+        power_page(ui);
+    else if (tab == ABOUT)
+        about_page(ui);
     else
         date_and_time(ui);
     if (scrolls)
@@ -575,7 +904,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    struct gui_window *window = gui_create_window("Settings", 680, 540);
+    struct gui_window *window = gui_create_window("Settings", 1000, 600);
     struct gui_ui ui;
     struct gui_message e;
 
@@ -590,6 +919,15 @@ int main(int argc, char **argv) {
     filter();
     load_wallpapers();
     load_apps();
+    system_open();
+    network_open();
+    if (argc > 1) // a tab to start on, by its name
+        for (int i = 0; i < TABS; i++)
+            tab = !strcasecmp(argv[1], tabs[i]) ? i : tab;
+    entered();
+
+    int every_second = gui_timer_start(1000, true);
+
     gui_ui_init(&ui, window);
     frame(&ui);
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
@@ -599,6 +937,10 @@ int main(int argc, char **argv) {
             gui_settings_load(&settings);
         if (e.type == GUI_TIMER && e.x == keep_timer && keep_left && --keep_left == 0)
             go_back();
+        if (e.type == GUI_TIMER && e.x == every_second && (tab == NETWORK || tab == POWER || tab == TIME)) {
+            read_system();
+            frame(&ui);
+        }
         if (gui_ui_event(&ui, &e))
             frame(&ui);
     }

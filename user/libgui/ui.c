@@ -1101,6 +1101,62 @@ static bool text_box(struct gui_ui *ui, const char *label, char *s, size_t size,
     return changed;
 }
 
+#define EDIT_LABEL "##renaming in place"
+
+void gui_edit_name(struct gui_ui *ui, char *text, bool folder) {
+    const char *dot = folder ? NULL : strrchr(text, '.');
+
+    ui->text_owner = id_of(EDIT_LABEL);
+    ui->text_anchor = 0;
+    ui->text_cursor = dot && dot > text ? (size_t)(dot - text) : strlen(text);
+    ui->edit_result = GUI_EDITING;
+}
+
+void gui_list_edit(struct gui_ui *ui, int index, char *text, size_t size) {
+    ui->edit_index = index, ui->edit_text = text, ui->edit_size = size;
+}
+
+int gui_edit_result(struct gui_ui *ui) {
+    int result = ui->edit_result;
+
+    ui->edit_result = GUI_EDITING;
+    return result;
+}
+
+// The box an item's name is renamed in, where it was, which has the keys while it's there.
+static void edit_in_place(struct gui_ui *ui, struct gui_rect r) {
+    uint32_t id = id_of(EDIT_LABEL);
+    struct editing e = {ui->edit_text, ui->edit_size, &ui->text_cursor, &ui->text_anchor, false, false};
+    int fits = (r.width - 2 * PADDING) / GUI_CHAR_WIDTH, y = r.y + (r.height - GUI_CHAR_HEIGHT) / 2;
+
+    if (ui->text_owner != id || ui->text_cursor > strlen(ui->edit_text) || ui->text_anchor > strlen(ui->edit_text)) {
+        ui->text_owner = id;
+        ui->text_cursor = ui->text_anchor = strlen(ui->edit_text);
+    }
+    for (int i = 0; i < ui->key_count && ui->edit_result == GUI_EDITING; i++) {
+        uint16_t code = ui->keys[i].code;
+
+        if (code == KEY_ESCAPE)
+            ui->edit_result = GUI_EDIT_CANCELLED;
+        else if (code == KEY_ENTER || code == (KEY_EXTENDED | KEY_ENTER))
+            ui->edit_result = GUI_EDIT_DONE;
+        else
+            edit(&ui->keys[i], &e);
+    }
+    if ((ui->mouse_pressed || ui->right_pressed) && !contains(r, ui->mouse_x, ui->mouse_y))
+        ui->edit_result = GUI_EDIT_DONE;
+
+    size_t first = (int)ui->text_cursor >= fits ? ui->text_cursor - fits + 1 : 0;
+
+    round_fill(ui, r.x, r.y, r.width, r.height, ROUND_SMALL, ACCENT);
+    round_fill(ui, r.x + 1, r.y + 1, r.width - 2, r.height - 2, ROUND_SMALL, PANEL);
+    draw_selection(ui, &e, r.x + PADDING, y, first, fits);
+    draw_fitted_mono(ui, r.x + PADDING, y, r.width - 2 * PADDING, ui->edit_text + first, 255, TEXT);
+    ui->text_drawn = true;
+    if (!ui->cursor_hidden)
+        fill(ui, r.x + PADDING + (int)(ui->text_cursor - first) * GUI_CHAR_WIDTH, y - 2, 1, GUI_CHAR_HEIGHT + 4, TEXT);
+}
+
 bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
     return text_box(ui, label, s, size, false);
 }
@@ -1754,8 +1810,10 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
 
     bool focused = focusable(ui, id);
     bool moved = false;
+    char *editing = ui->edit_text; // whose keys they are, while it's there
 
-    for (int i = 0; focused && i < ui->key_count; i++) {
+    ui->edit_text = NULL;
+    for (int i = 0; focused && !editing && i < ui->key_count; i++) {
         uint16_t code = ui->keys[i].code;
         int page = rows - 1 > 1 ? rows - 1 : 1;
 
@@ -1807,8 +1865,14 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
             round_fill(ui, r.x, r.y, r.width, r.height, ROUND_SMALL + 1, on ? ACCENT : FRAME_HOT);
         if (icons && icons[i])
             draw_image(ui, r.x + 5, r.y + (ROW_HEIGHT - GUI_ICON_SIZE) / 2, icons[i]);
-        draw_fitted(ui, r.x + text_x, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - text_x - 6, items[i], 255,
-                    on ? ON_ACCENT : TEXT);
+        if (editing && i == ui->edit_index) {
+            ui->edit_text = editing;
+            edit_in_place(ui, (struct gui_rect){r.x + text_x - PADDING, r.y + 1, r.width - text_x + PADDING - 2, ROW_HEIGHT - 2});
+            ui->edit_text = NULL;
+        } else {
+            draw_fitted(ui, r.x + text_x, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - text_x - 6, items[i], 255,
+                        on ? ON_ACCENT : TEXT);
+        }
     }
     ui->layout.clip = was;
     if (focused)
@@ -1840,7 +1904,10 @@ int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, con
 
     bool focused = focusable(ui, id);
 
-    for (int i = 0; focused && i < ui->key_count; i++) {
+    char *editing = ui->edit_text; // whose keys they are, while it's there
+
+    ui->edit_text = NULL;
+    for (int i = 0; focused && !editing && i < ui->key_count; i++) {
         uint16_t code = ui->keys[i].code;
 
         moved = true;
@@ -1891,9 +1958,18 @@ int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, con
 
         if (on || over(ui, r))
             round_fill(ui, r.x, r.y, r.width, r.height, ROUND_SMALL + 1, on ? ACCENT : FRAME_HOT);
-        if (image)
-            draw_image(ui, r.x + (r.width - image->width) / 2, r.y + 6 + (GUI_THUMBNAIL - image->height) / 2, image);
-        text(ui, r.x + (r.width - gui_text_width(shown, 1)) / 2, r.y + GUI_THUMBNAIL + 10, shown, on ? ON_ACCENT : TEXT, 1);
+        if (image) { // in the desktop's pixels, as an icon for 2x is twice as many of its own
+            int own = image->scale > 1 ? image->scale : 1;
+
+            draw_image(ui, r.x + (r.width - image->width / own) / 2, r.y + 6 + (GUI_THUMBNAIL - image->height / own) / 2, image);
+        }
+        if (editing && i == ui->edit_index) {
+            ui->edit_text = editing;
+            edit_in_place(ui, (struct gui_rect){r.x, r.y + GUI_THUMBNAIL + 6, r.width, GUI_CHAR_HEIGHT + 8});
+            ui->edit_text = NULL;
+        } else {
+            text(ui, r.x + (r.width - gui_text_width(shown, 1)) / 2, r.y + GUI_THUMBNAIL + 10, shown, on ? ON_ACCENT : TEXT, 1);
+        }
     }
     ui->layout.clip = was;
     if (focused)

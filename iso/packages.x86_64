@@ -14,7 +14,9 @@ pipewire-pulse
 pipewire-alsa
 wireplumber
 upower
+power-profiles-daemon
 polkit
+hwdata
 # The GPU: NVIDIA's open modules for the RTX 4070, and Mesa for the rest
 nvidia-open
 mesa

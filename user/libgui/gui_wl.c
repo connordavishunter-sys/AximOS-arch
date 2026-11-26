@@ -94,6 +94,7 @@ static struct {
     struct wl_data_source *own_source;
     char dropped[GUI_PATH_MAX];
     struct gui_window *drop_window;
+    char *dragging; // the URI of a file this program's dragging, until the drag's over
 } wl;
 
 static int slot_of(const struct gui_window *window) {
@@ -491,9 +492,12 @@ static bool first_path(const char *uris, char path[GUI_PATH_MAX]) {
     return n > 0;
 }
 
+// A file dropped on a window: its path, from its URI, read from the program that
+// dragged it, or, when that's this one, which can't answer while it's waiting for
+// itself, from its own drag.
 static void drop(void *data, struct wl_data_device *device) {
     size_t length;
-    char *uris = wl.dragged ? receive(wl.dragged, URI_TYPE, &length) : NULL;
+    char *uris = wl.dragging ? strdup(wl.dragging) : wl.dragged ? receive(wl.dragged, URI_TYPE, &length) : NULL;
 
     (void)data, (void)device;
     if (uris && first_path(uris, wl.dropped))
@@ -949,6 +953,8 @@ static void source_send(void *data, struct wl_data_source *source, const char *t
 }
 
 static void source_cancelled(void *data, struct wl_data_source *source) {
+    if (data && data == wl.dragging)
+        wl.dragging = NULL;
     free(data);
     if (source == wl.own_source) {
         free(wl.own);
@@ -1064,6 +1070,7 @@ bool gui_drag_file(const char *path) {
         return false;
     source = wl_data_device_manager_create_data_source(wl.data_manager);
     wl_data_source_add_listener(source, &source_listener, uri);
+    wl.dragging = uri;
     wl_data_source_offer(source, URI_TYPE);
     wl_data_source_set_actions(source, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
     wl_data_device_start_drag(wl.data_device, source, wl.pointed->backend->surface, NULL, wl.press_serial);
