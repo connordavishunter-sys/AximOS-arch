@@ -471,6 +471,28 @@ static void paste(int master) {
     free(text);
 }
 
+// A file dropped on the window types its path, quoted for the shell, and a space,
+// as if it were pasted.
+static void drop_path(int master, const char *path) {
+    bool plain = path[strspn(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+,:@%")] == '\0';
+
+    if (t->bracketed_paste)
+        write_all(master, "\x1b[200~", 6);
+    if (plain) {
+        write_all(master, path, strlen(path));
+    } else {
+        write_all(master, "'", 1);
+        for (const char *at = path; *at; at++)
+            *at == '\'' ? write_all(master, "'\\''", 4) : write_all(master, at, 1);
+        write_all(master, "'", 1);
+    }
+    write_all(master, " ", 1);
+    if (t->bracketed_paste)
+        write_all(master, "\x1b[201~", 6);
+    printf("term: dropped %s\n", path);
+    fflush(stdout);
+}
+
 // --- Selecting ---
 
 // The cell under a point in the window.
@@ -990,6 +1012,11 @@ int main(int argc, char **argv) {
                 dirty[t->row] = true;
                 if (t->focus_events)
                     write_all(t->master, focused ? "\x1b[I" : "\x1b[O", 3);
+            } else if (e.type == GUI_DROP) {
+                char path[GUI_PATH_MAX];
+
+                if (gui_dropped_file(&e, path))
+                    drop_path(t->master, path);
             } else if (e.type == GUI_RESIZE) {
                 resize(e.width, e.height);
             } else if (e.type == GUI_SETTINGS) {

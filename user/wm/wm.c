@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -239,6 +240,7 @@ static int drag_x, drag_y;
 static struct window *grabbed; // pressed in its contents, so it gets the mouse until release
 static char drag_file[GUI_PATH_MAX]; // dragged from grabbed, to drop on a window
 static const struct gui_image *drag_icon;
+static bool drag_given; // to the app it was taken over, as its own drag, so it's that app's to take
 static uint16_t modifiers; // the keys held, which go with a drop: Ctrl copies, rather than moving
 static struct window *resizing;
 static int resize_x, resize_y, resize_width, resize_height;
@@ -3293,6 +3295,11 @@ static void load_desktop(bool always) {
         printf(" %s", desktop_items[i].name);
     }
     printf("\n");
+    for (int i = 0; i < count; i++) {
+        struct rect r = desktop_cell(i);
+
+        printf("wm: desktop icon at %d %d %d %d, %s\n", r.x, r.y, r.width, r.height, desktop_items[i].name);
+    }
 }
 
 // Half the colour over what's there.
@@ -4789,6 +4796,7 @@ static void lock(void) {
     super_down = super_alone = false; // let go while locked
     dragging = grabbed = resizing = NULL;
     drag_file[0] = '\0';
+    drag_given = false;
     stop_snap();
     set_focus(NULL);
     fade_screen(true);
@@ -5862,8 +5870,8 @@ static void press(uint32_t changed) {
     cursor_y = y;
 }
 
-// A file let go over a window's contents goes to it, which comes to the top, with
-// the keys held.
+// A file let go over a window's contents goes to it, through the drag the server
+// was given, and the window comes to the top.
 static void drop_file(void) {
     enum part part;
     int edges;
@@ -5881,9 +5889,10 @@ static void drop_file(void) {
     if (w && part == PART_CONTENT && !locked) {
         set_focus(w);
         raise_window(w);
-        printf("wm: dropped %s on %s, which can't take it yet\n", drag_file, w->title);
+        printf("wm: dropped %s on %s\n", drag_file, w->title);
     }
     drag_file[0] = '\0';
+    drag_given = false;
 }
 
 // A mouse that says how far it moved goes the speed the settings choose times
@@ -6037,6 +6046,8 @@ static void handle_mouse(const struct mouse_event *e) {
 
     if (moved && (buttons & MOUSE_BUTTON_LEFT))
         desktop_drag();
+    if (moved && drag_file[0] && !drag_given && !locked && (drag_given = server_drag_file(drag_file)))
+        printf("wm: gave %s to the app it's over\n", drag_file);
     if (pressed)
         press(pressed);
     if (released && grabbed)
@@ -6612,6 +6623,14 @@ int main(int argc, char **argv) {
     if (home && chdir(home) < 0)
         printf("wm: can't go to %s\n", home);
     mkdir(desktop_dir, 0755);
+    // What apps put in the desktop's folder, or take from it, shows straight away.
+    int desktop_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+
+    if (desktop_watch >= 0 && inotify_add_watch(desktop_watch, desktop_dir,
+                                                IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO) < 0) {
+        close(desktop_watch);
+        desktop_watch = -1;
+    }
     fit_screen();
     if (!screen.pixels)
         return fail("screen");
@@ -6637,11 +6656,12 @@ int main(int argc, char **argv) {
     check_battery();
     report_tray();
     while (!quitting) {
-        struct pollfd fds[5 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
-        struct pollfd *input = fds + 5;
-        int network_wait, polkit_wait, fd_count = 5 + display->poll_fds(input);
+        struct pollfd fds[6 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
+        struct pollfd *input = fds + 6;
+        int network_wait, polkit_wait, fd_count = 6 + display->poll_fds(input);
 
         fds[4] = (struct pollfd){.fd = update_fd, .events = POLLIN};
+        fds[5] = (struct pollfd){.fd = desktop_watch, .events = POLLIN};
         if (update_due < 0 && logged_in && !login_mode)
             update_due = now_ms() + UPDATE_FIRST_MS;
         if (update_asked || (update_due >= 0 && now_ms() >= update_due))
@@ -6725,6 +6745,13 @@ int main(int argc, char **argv) {
             auth_changed();
         if (update_fd >= 0 && fds[4].revents)
             read_updates();
+        if (desktop_watch >= 0 && fds[5].revents) {
+            char events[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+
+            while (read(desktop_watch, events, sizeof(events)) > 0)
+                ;
+            load_desktop(false);
+        }
 
         if (display->read(input, &output, &(struct input){handle_mouse, handle_key, quit}))
             fit_screen();

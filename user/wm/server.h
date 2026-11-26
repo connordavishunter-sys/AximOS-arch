@@ -66,5 +66,9 @@ bool server_start_login(const char *path, const char *option);
 // Puts what wm has on the clipboard: text, or a picture width by height, 0x00RRGGBB.
 void server_set_clipboard(const char *data, size_t length, int width, int height);
 
+// Gives the file wm's dragging from the desktop to the app whose window the cursor's
+// over, as that app would have it from another's drag, or false if there's none.
+bool server_drag_file(const char *path);
+
 // Closes every app's connection, as logging out does.
 void server_close_apps(void);

@@ -1,6 +1,7 @@
 #include "server.h"
 #include "aximos-shell-v1-protocol.h"
 #include <drm_fourcc.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <key_linux.h>
@@ -1241,6 +1242,72 @@ static void drag_to(double x, double y) {
     wlr_seat_pointer_notify_clear_focus(server.seat);
 }
 
+// A file wm drags from the desktop, offered to apps as a URI, as their own drags are.
+// With dnd_finish, wlroots frees it itself, once it's let go over nothing that takes
+// it, or the app it went to is done with it.
+static void drag_source_finish(struct wlr_data_source *source) {
+    (void)source;
+}
+
+static const struct wlr_data_source_impl drag_source_impl = {
+    .send = source_send, .destroy = source_destroy, .dnd_finish = drag_source_finish};
+
+static char *file_uri(const char *path) {
+    char *uri = malloc(strlen("file://\r\n") + 3 * strlen(path) + 1), *at = uri;
+
+    if (!uri)
+        return NULL;
+    at += sprintf(at, "file://");
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++)
+        at += isalnum(*p) || strchr("/-._~", *p) ? sprintf(at, "%c", *p) : sprintf(at, "%%%02X", *p);
+    strcpy(at, "\r\n");
+    return uri;
+}
+
+bool server_drag_file(const char *path) {
+    struct wlr_seat_pointer_state *pointer = &server.seat->pointer_state;
+    struct wlr_seat_client *client;
+    struct wm_source *s;
+    struct wlr_drag *drag;
+    struct wlr_box box;
+    struct surface *under;
+    char **type;
+    int sx, sy;
+    bool held = false;
+
+    if (server.seat->drag || !server.output)
+        return false;
+    wlr_output_layout_get_box(server.layout, server.output, &box);
+    under = wm_surface_at((int)(server.cursor->x - box.x), (int)(server.cursor->y - box.y), &sx, &sy);
+    // wlroots wants a client the drag came from, which the app it's over stands in for.
+    if (!under || !under->surface
+        || !(client = wlr_seat_client_for_wl_client(server.seat, wl_resource_get_client(under->surface->resource))))
+        return false;
+    if (!(s = calloc(1, sizeof(*s))) || !(s->data = file_uri(path))) {
+        free(s);
+        return false;
+    }
+    s->length = strlen(s->data);
+    wlr_data_source_init(&s->base, &drag_source_impl);
+    s->base.actions = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+    if ((type = wl_array_add(&s->base.mime_types, sizeof(*type))))
+        *type = strdup(URI_TYPE);
+    if (!(drag = wlr_drag_create(client, &s->base, NULL))) {
+        wlr_data_source_destroy(&s->base);
+        return false;
+    }
+    // The press that started it was wm's, on the desktop, so the seat's told of it, as
+    // the drag ends when it's let go.
+    for (size_t i = 0; i < pointer->button_count; i++)
+        held |= pointer->buttons[i].button == 0x110;
+    wlr_seat_pointer_notify_clear_focus(server.seat);
+    if (!held)
+        wlr_seat_pointer_notify_button(server.seat, now_ms(), 0x110, WL_POINTER_BUTTON_STATE_PRESSED);
+    wlr_seat_start_pointer_drag(server.seat, drag, wl_display_next_serial(server.display));
+    drag_to(server.cursor->x - box.x, server.cursor->y - box.y);
+    return true;
+}
+
 // Cursors: wm draws its own, in the shapes it has, and apps choose among them.
 static void on_request_shape(struct wl_listener *l, void *data) {
     struct wlr_cursor_shape_manager_v1_request_set_shape_event *e = data;
@@ -1345,7 +1412,8 @@ static void on_button(struct wl_listener *l, void *data) {
         int sx, sy;
 
         wlr_output_layout_get_box(server.layout, server.output, &box);
-        if (e->state == WL_POINTER_BUTTON_STATE_RELEASED
+        if (e->state == WL_POINTER_BUTTON_STATE_RELEASED && server.seat->drag->source
+            && server.seat->drag->source->impl != &drag_source_impl // wm's own, which wm.c drops itself
             && !wm_surface_at((int)(server.cursor->x - box.x), (int)(server.cursor->y - box.y), &sx, &sy))
             read_drop(server.seat->drag->source);
         wlr_seat_pointer_notify_button(server.seat, e->time_msec, e->button, e->state);

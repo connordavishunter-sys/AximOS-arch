@@ -30,10 +30,11 @@ admin's password, as polkit's agent, when a change needs one. Taskbar buttons ha
 menu, the desktop's makes new folders and files and opens Settings, and things are
 renamed where their names are, on the desktop and in Files. Installed systems update
 from AximOS's own signed repository and Arch's, from Settings' Updates page, which wm
-tells of each day.
+tells of each day. Files drag from the desktop into apps, and from one app to
+another: the editor, Paint, the viewer and the player open them, Files moves them into
+its folder, and the terminal types their paths.
 
-Still to come: dragging
-files between wm's desktop and apps; and screens beyond the first.
+Still to come: screens beyond the first.
 
 ## How it fits together
 
@@ -48,7 +49,8 @@ files between wm's desktop and apps; and screens beyond the first.
   `tools/icons.py` draws.
 - **libgui** (`user/libgui`) is a Wayland client: each window is an xdg-shell toplevel,
   drawn from shared memory, with the clipboard and dragging files on Wayland's data
-  device. That's cleaner than keeping its own socket protocol beside Wayland: wm has one
+  device. wm's own drags, from the desktop, are Wayland drags too, once over an app,
+  so any Wayland app takes them. That's cleaner than keeping its own socket protocol beside Wayland: wm has one
   kind of app, not two, and libgui's apps run on any Wayland desktop. What Wayland has no
   protocol for goes through AximOS's own, `protocol/aximos-shell-v1.xml`: notifications
   with buttons, blur behind see-through windows, the screen's size and scale, settings
