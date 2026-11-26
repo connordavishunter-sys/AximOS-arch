@@ -135,6 +135,7 @@ install: all
 	install -Dm644 system/aximos.desktop $(DESTDIR)$(PREFIX)/share/wayland-sessions/aximos.desktop
 	install -Dm644 system/logind.conf $(DESTDIR)$(PREFIX)/lib/systemd/logind.conf.d/aximos.conf
 	install -Dm644 system/pam.d/aximos-lock $(DESTDIR)/etc/pam.d/aximos-lock
+	install -Dm644 system/aximos-recovery.sh $(DESTDIR)/etc/profile.d/aximos-recovery.sh
 
 # The pacman packages, built in a clean chroot of Arch's own core and extra, from a
 # tarball of the tree as it is, into a repository the ISO installs them from. Arch's
@@ -172,9 +173,14 @@ publish:
 		--notes "The pacman repository installed AximOS systems update from." --latest=false
 	cp -L $(REPO)/aximos.db.tar.gz $(BUILD)/aximos.db && cp -L $(REPO)/aximos.db.tar.gz.sig $(BUILD)/aximos.db.sig
 	cp -L $(REPO)/aximos.files.tar.gz $(BUILD)/aximos.files && cp -L $(REPO)/aximos.files.tar.gz.sig $(BUILD)/aximos.files.sig
-	gh release view $(RELEASE) --json assets -q '.assets[].name' | grep -v -x -F \
-		-e aximos.db -e aximos.db.sig -e aximos.files -e aximos.files.sig \
-		$(foreach p,$(notdir $(wildcard $(REPO)/*.pkg.tar.zst)),-e $(p) -e $(p).sig) \
+	# What's there but for the newest version before this one, which an update can be
+	# undone to, goes.
+	gh release view $(RELEASE) --json assets -q '.assets[].name' > $(BUILD)/release-assets
+	keep=$$(sed -nE 's/^aximos-[a-z]+-(.+-[0-9]+)-(x86_64|any)\.pkg\.tar\.zst$$/\1/p' $(BUILD)/release-assets \
+		| grep -vxF '$(VERSION)-1' | sort -uV | tail -1); \
+	grep -v -x -F -e aximos.db -e aximos.db.sig -e aximos.files -e aximos.files.sig \
+		$(foreach p,$(notdir $(wildcard $(REPO)/*.pkg.tar.zst)),-e $(p) -e $(p).sig) $(BUILD)/release-assets \
+		| { if [ -n "$$keep" ]; then grep -vF -- "-$$keep-"; else cat; fi; } \
 		| xargs -r -n1 gh release delete-asset $(RELEASE) -y
 	gh release upload $(RELEASE) --clobber $(REPO)/*.pkg.tar.zst $(REPO)/*.pkg.tar.zst.sig \
 		$(BUILD)/aximos.db $(BUILD)/aximos.db.sig $(BUILD)/aximos.files $(BUILD)/aximos.files.sig

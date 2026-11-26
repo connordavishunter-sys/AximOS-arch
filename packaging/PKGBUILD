@@ -57,7 +57,8 @@ package_aximos-desktop() {
     install=aximos-desktop.install
     _install_all
     _take usr/bin/wm usr/bin/aximos-update usr/lib/aximos/login usr/share/aximos/wallpapers usr/share/wayland-sessions \
-        usr/lib/systemd/logind.conf.d usr/share/polkit-1/actions/org.aximos.update.policy etc/pam.d/aximos-lock
+        usr/lib/systemd/logind.conf.d usr/share/polkit-1/actions/org.aximos.update.policy etc/pam.d/aximos-lock \
+        etc/profile.d/aximos-recovery.sh
 }
 
 package_aximos-installer() {

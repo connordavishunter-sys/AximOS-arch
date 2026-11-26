@@ -1,6 +1,31 @@
-# The services wm's panels use, which a system installed before them doesn't have on.
+# What a system installed before them doesn't have: BlueZ on, for wm's Bluetooth
+# panel, and a recovery entry in Limine's menu, which starts AximOS without wm, at a
+# text console, where the last update can be undone. It's AximOS's own entry, with
+# that added, and the menu as it was is kept beside it.
+recovery_entry() {
+    local conf=/boot/EFI/BOOT/limine.conf
+    [ -f "$conf" ] && grep -qx '/AximOS' "$conf" && ! grep -q '^/AximOS, recovery' "$conf" || return 0
+    awk '
+        function recovery() {
+            print "/AximOS, recovery"
+            for (i = 1; i <= n; i++) print entry[i]
+            n = 0
+        }
+        /^\// && copying { recovery(); print ""; copying = 0 }
+        { print }
+        copying && /^[ \t]+[^ \t]/ {
+            line = $0
+            if (line ~ /cmdline:/) { sub(/ quiet/, "", line); line = line " systemd.unit=multi-user.target" }
+            entry[++n] = line
+        }
+        $0 == "/AximOS" { copying = 1 }
+        END { if (copying) { print ""; recovery() } }
+    ' "$conf" >"$conf.new" && cp "$conf" "$conf.before-recovery" && mv "$conf.new" "$conf"
+}
+
 post_install() {
     systemctl enable bluetooth.service >/dev/null 2>&1 || true
+    recovery_entry
 }
 
 post_upgrade() {

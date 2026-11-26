@@ -212,7 +212,7 @@ static void screen_changed(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[80]; // the wallpapers from 41, the system pages' from 62
+    static struct gui_rect places[96]; // the wallpapers from 41, the system pages' from 62
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -682,6 +682,29 @@ static char update_lines[64][128];
 static const char *update_items[64];
 static int update_count, update_at = -1;
 
+// The last update, as aximos-update keeps it: when, and how many packages it changed
+// and added. Undoing it puts back what it changed, and is a job like updating.
+#define UPDATE_RECORD "/var/lib/aximos/last-update"
+static char last_update[32]; // or "" without one
+static int last_changed, last_added;
+static bool undoing;
+
+static void read_last_update(void) {
+    FILE *f = fopen(UPDATE_RECORD, "r");
+    char line[256], name[128], old[96];
+
+    last_update[0] = '\0';
+    last_changed = last_added = 0;
+    while (f && fgets(line, sizeof(line), f)) {
+        if (line[0] == '#')
+            snprintf(last_update, sizeof(last_update), "%.*s", (int)strcspn(line + 2, "\n"), line + 2);
+        else if (sscanf(line, "%127s %95s", name, old) == 2)
+            *(strcmp(old, "-") ? &last_changed : &last_added) += 1;
+    }
+    if (f)
+        fclose(f);
+}
+
 static bool job_start(struct job *j, char *const argv[]) {
     int out[2];
 
@@ -775,7 +798,7 @@ static void updates_page(struct gui_ui *ui) {
     bool installing = updating.pid && !updating.done;
 
     if (installing) {
-        gui_label(ui, "Installing updates...");
+        gui_label(ui, undoing ? "Undoing the last update..." : "Installing updates...");
         gui_label(ui, "%s", last_line(&updating));
         return;
     }
@@ -792,12 +815,20 @@ static void updates_page(struct gui_ui *ui) {
         report(ui, 79, "update");
     }
     if (updating.done) {
-        snprintf(status, sizeof(status), updating.status == 0 ? "Updated. Some take effect once you log in again, or restart."
-                                       : updating.status == 126 || updating.status == 127
-                                           ? "Updating needs an admin's password."
-                                           : "The update didn't finish: %s", last_line(&updating));
-        printf("settings: updated: %s\n", status);
+        if (undoing)
+            snprintf(status, sizeof(status), updating.status == 0 ? "Put back what the last update changed. Restart for all of it to take effect."
+                                           : updating.status == 126 || updating.status == 127
+                                               ? "Undoing an update needs an admin's password."
+                                               : "Couldn't undo it: %s", last_line(&updating));
+        else
+            snprintf(status, sizeof(status), updating.status == 0 ? "Updated. Some take effect once you log in again, or restart."
+                                           : updating.status == 126 || updating.status == 127
+                                               ? "Updating needs an admin's password."
+                                               : "The update didn't finish: %s", last_line(&updating));
+        printf("settings: %s: %s\n", undoing ? "undone" : "updated", status);
         updating = (struct job){0};
+        undoing = false;
+        read_last_update();
         look_for_updates();
     }
     gui_label(ui, "%s", status);
@@ -808,6 +839,18 @@ static void updates_page(struct gui_ui *ui) {
     else {
         gui_label(ui, update_count == 1 ? "1 update is ready:" : "%d updates are ready:", update_count);
         gui_list(ui, "##updates", update_items, update_count, &update_at, 12);
+    }
+    if (last_update[0] && last_changed) {
+        gui_separator(ui);
+        gui_label(ui, "Last updated %s: %d package%s changed%s.", last_update, last_changed, last_changed == 1 ? "" : "s",
+                  last_added ? ", and some added" : "");
+        if (gui_button(ui, "Undo last update")) {
+            status[0] = '\0';
+            undoing = true;
+            job_start(&updating, (char *[]){"pkexec", "/usr/bin/aximos-update", "--undo", NULL});
+            printf("settings: undoing the last update\n");
+        }
+        report(ui, 80, "undo");
     }
 }
 
@@ -821,6 +864,8 @@ static void entered(void) {
         network_scan();
     if (tab == ABOUT)
         about_read(&about), snprintf(new_hostname, sizeof(new_hostname), "%s", about.hostname);
+    if (tab == UPDATES)
+        read_last_update();
     if (tab == UPDATES && !update_count && !(updating.pid && !updating.done))
         look_for_updates();
     read_system();

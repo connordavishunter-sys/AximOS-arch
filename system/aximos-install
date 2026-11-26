@@ -105,6 +105,12 @@ timeout: 5
     path: boot():/vmlinuz-linux
     module_path: boot():/initramfs-linux.img
     cmdline: root=PARTUUID=$root_uuid rw nvidia_drm.modeset=1 console=ttyS0,115200 console=tty1 quiet
+
+/AximOS, recovery
+    protocol: linux
+    path: boot():/vmlinuz-linux
+    module_path: boot():/initramfs-linux.img
+    cmdline: root=PARTUUID=$root_uuid rw nvidia_drm.modeset=1 console=ttyS0,115200 console=tty1 systemd.unit=multi-user.target
 EOF
     look=$(mktemp -d)
     while read -r part fs uuid label; do

@@ -2,13 +2,74 @@
 # Updates AximOS, Arch's packages and AximOS's own, as root. Settings runs it with
 # pkexec, so wm asks for an admin's password, and shows what it says as it goes:
 # the keyrings first, so packages signed with new keys are trusted, then the rest.
+# What each update changed is kept in RECORD, and --undo puts back the versions it
+# replaced, from pacman's cache, keeping any packages it added.
 set -o pipefail
+
+RECORD=/var/lib/aximos/last-update
+CACHE=/var/cache/pacman/pkg
 
 say() { echo "aximos-update: $*"; }
 
 [[ $EUID == 0 ]] || { say "it needs to be run as root"; exit 1; }
+
+# A package as it was: from pacman's cache, or else from where it came from, AximOS's
+# release, which keeps the version before the newest, or the Arch Linux Archive, which
+# keeps them all. pacman checks the signature of one that's downloaded.
+find_package() {
+    local name=$1 version=$2 arch file url
+    for file in "$CACHE/$name-$version"-{x86_64,any}.pkg.tar.{zst,xz}; do
+        [[ -f $file ]] && { echo "$file"; return; }
+    done
+    for arch in x86_64 any; do
+        if [[ $name == aximos-* ]]; then
+            url="$(pacman-conf --repo aximos Server 2>/dev/null | head -1)/$name-$version-$arch.pkg.tar.zst"
+        else
+            url="https://archive.archlinux.org/packages/${name:0:1}/$name/$name-$version-$arch.pkg.tar.zst"
+        fi
+        curl -sfIL "$url" >/dev/null 2>&1 && { echo "$url"; return; }
+    done
+}
+
+undo() {
+    local files=() added=0 name old new file
+    [[ -s $RECORD ]] || { say "there's no update to undo"; exit 1; }
+    say "finding what the last update replaced"
+    while read -r name old new; do
+        [[ $name == '#'* || -z $name ]] && continue
+        if [[ $old == - ]]; then
+            (( added++ ))
+            continue
+        fi
+        file=$(find_package "$name" "$old")
+        [[ -n $file ]] || { say "$name $old can't be found, so the update can't be undone"; exit 1; }
+        files+=("$file")
+    done <"$RECORD"
+    if (( ${#files[@]} )); then
+        say "putting back ${#files[@]} packages from before the last update"
+        pacman -U --noconfirm "${files[@]}" 2>&1 || { say "they couldn't be put back"; exit 1; }
+    fi
+    mv "$RECORD" "$RECORD.undone"
+    (( added )) && say "kept the $added packages it added"
+    say "done"
+}
+
+# What changed, as "name old new", with - for a package that's new.
+record() {
+    local changes
+    changes=$(LC_ALL=C join -a 2 -e - -o 0,1.2,2.2 <(LC_ALL=C sort <<<"$before") <(pacman -Q | LC_ALL=C sort) |
+              awk '$2 != $3')
+    [[ -n $changes ]] || return
+    mkdir -p "${RECORD%/*}"
+    { echo "# $(date '+%Y-%m-%d %H:%M')"; echo "$changes"; } >"$RECORD"
+}
+
+[[ $1 == --undo ]] && undo && exit 0
+
 say "looking at the repositories"
 pacman -Sy --noconfirm 2>&1 || { say "couldn't reach the repositories"; exit 1; }
+before=$(pacman -Q)
+trap record EXIT
 keyrings=()
 for keyring in archlinux-keyring aximos-keyring; do
     pacman -Si "$keyring" >/dev/null 2>&1 && keyrings+=("$keyring")

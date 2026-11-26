@@ -81,7 +81,11 @@ Still to come: screens beyond the first.
   repository's `packages` release, which installed systems' `pacman.conf` has as
   `[aximos]`, trusting only that key. Settings' Updates page lists what's waiting, with
   `checkupdates`, and installs it with `aximos-update`, through `pkexec`, so wm asks for
-  the password; wm looks each day, and says when there are some.
+  the password; wm looks each day, and says when there are some. `aximos-update` keeps
+  what each update changed in `/var/lib/aximos/last-update`, and `aximos-update --undo`,
+  from Settings or the boot menu's recovery entry, which starts a text console without
+  wm, puts back the versions it replaced: from pacman's cache, or else the Arch Linux
+  Archive, or the release, which keeps the version before the newest.
 - **Logging in**: greetd runs `wm --login`, whose log-in screen (`user/login`) logs in
   through greetd's socket. The lock screen checks the password with PAM.
 

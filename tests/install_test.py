@@ -77,6 +77,7 @@ try:
           and len(re.findall(r'vdb\d', parts)) == 3, parts)
     menu = vm.run('mount /dev/vdb2 /mnt && cat /mnt/EFI/BOOT/limine.conf; umount /mnt')
     check('with the other drive\'s AximOS in its menu', '/AximOS' in menu and re.search(r'/AximOS, on vda\d', menu) and 'loop' not in menu, menu)
+    check('and a recovery entry, without wm', re.search(r'/AximOS, recovery\n.*\n.*\n.*\n    cmdline: .* systemd.unit=multi-user.target\n', menu), menu)
 finally:
     vm.close()
 
@@ -99,6 +100,23 @@ try:
     check('and logs in', vm.wait_wm(f'login: logged in {NAME}', 30), vm.wm_log())
     check('to the desktop', vm.wait_wm('wm: running at', 60) and vm.wm_log().count('wm: running at') >= 2, vm.wm_log())
     vm.save_screenshot('installed-desktop')
+    # The recovery entry next time, as if it were chosen from the menu.
+    vm.run("sed -i 's/^timeout: 5$/timeout: 1\\ndefault_entry: 2/' /boot/EFI/BOOT/limine.conf && sync")
+finally:
+    vm.close()
+
+# Recovery: AximOS without wm, at a text console, where the last update can be undone.
+vm = VM(timeout=600, iso=None, disks=(first,))
+try:
+    vm.log_in(NAME, PASSWORD)
+    check('the recovery entry boots', 'systemd.unit=multi-user.target' in vm.run('cat /proc/cmdline'), vm.run('cat /proc/cmdline'))
+    time.sleep(5)
+    check('to a console, without wm', vm.run('systemctl is-active display-manager') != 'active' and not vm.run('pgrep -x wm'),
+          vm.run('systemctl is-active display-manager; pgrep -a wm'))
+    check('which says how to undo an update', 'aximos-update --undo' in vm.run('cat /etc/profile.d/aximos-recovery.sh'),
+          vm.run('ls /etc/profile.d'))
+    said = vm.run('aximos-update --undo 2>&1')
+    check('and aximos-update can undo one from there', 'there\'s no update to undo' in said, said)
 finally:
     vm.close()
 
