@@ -147,7 +147,8 @@ PACKAGING := $(BUILD)/packaging
 PACKAGE_CACHE := $(abspath $(BUILD)/package-cache)
 # Each build's version comes from git, as how many commits there are and the last's
 # hash, so every build is newer than the one before. Packages and the repository's
-# database are signed with SIGNING_KEY, which installed systems trust.
+# database are signed with SIGNING_KEY, which installed systems trust, or left unsigned
+# with SIGNING_KEY empty, as the ISO's own repository needn't be.
 VERSION ?= 0.1.0.r$(shell git rev-list --count HEAD).g$(shell git rev-parse --short HEAD)
 SIGNING_KEY ?= D0EB0C9AA46C7C675C8306B1F344BF999C1E9042
 packages:
@@ -161,8 +162,8 @@ packages:
 	cd $(PACKAGING) && makechrootpkg -c -u -r $(abspath $(CHROOT))
 	rm -f $(REPO)/*.pkg.tar.zst $(REPO)/*.sig $(REPO)/aximos.*
 	cp $(PACKAGING)/*.pkg.tar.zst $(REPO)/
-	for p in $(REPO)/*.pkg.tar.zst; do gpg --batch --yes -u $(SIGNING_KEY) --detach-sign "$$p"; done
-	repo-add -q -s -k $(SIGNING_KEY) $(REPO)/aximos.db.tar.gz $(REPO)/*.pkg.tar.zst
+	$(if $(SIGNING_KEY),for p in $(REPO)/*.pkg.tar.zst; do gpg --batch --yes -u $(SIGNING_KEY) --detach-sign "$$p"; done)
+	repo-add -q $(if $(SIGNING_KEY),-s -k $(SIGNING_KEY)) $(REPO)/aximos.db.tar.gz $(REPO)/*.pkg.tar.zst
 
 # The packages, on AximOS-arch's packages release, where installed systems update
 # from: what's there is replaced by what make packages made. The database goes as
