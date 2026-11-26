@@ -4897,6 +4897,34 @@ static void center(struct window *w) {
     w->y = (screen.height - w->canvas.height) / 2;
 }
 
+void wm_room(int *width, int *height) {
+    struct rect d = desktop();
+
+    *width = d.width - 2 * GAP - 2 * BORDER;
+    *height = d.height - 2 * GAP - TITLE_HEIGHT - 2 * BORDER;
+}
+
+static void move_window(struct window *w, int x, int y);
+static void ask_size(struct window *w, int width, int height);
+
+// A new window that wouldn't all be on the desktop where it opens goes where it is,
+// and one bigger than it is made to fit.
+static void fit_new(struct window *w) {
+    struct rect d = desktop(), f = frame_of(w);
+    int most_width, most_height;
+
+    wm_room(&most_width, &most_height);
+    if (f.width > d.width - 2 * GAP || f.height > d.height - 2 * GAP) {
+        move_window(w, d.x + GAP + BORDER, d.y + GAP + TITLE_HEIGHT + BORDER);
+        ask_size(w, w->canvas.width < most_width ? w->canvas.width : most_width,
+                 w->canvas.height < most_height ? w->canvas.height : most_height);
+        printf("wm: fitted a window %dx%d to the desktop\n", w->canvas.width, w->canvas.height);
+        return;
+    }
+    if (f.x + f.width > d.x + d.width - GAP || f.y + f.height > d.y + d.height - GAP)
+        move_window(w, d.x + d.width - GAP - f.width + BORDER, d.y + d.height - GAP - f.height + TITLE_HEIGHT + BORDER);
+}
+
 struct window *wm_window_new(struct surface *s, int width, int height, bool popup, int x, int y) {
     struct window *w = window_count < MAX_WINDOWS && width > 0 && height > 0 && width <= MAX_SIZE && height <= MAX_SIZE
                          ? calloc(1, sizeof(*w))
@@ -4926,6 +4954,8 @@ struct window *wm_window_new(struct surface *s, int width, int height, bool popu
     if (popup)
         w->x = x, w->y = y;
     windows[window_count++] = w;
+    if (!popup && !w->login)
+        fit_new(w);
     if (!popup) {
         arrive(w, shrunk(frame_of(w)), OPEN_MS);
         damage_taskbar();

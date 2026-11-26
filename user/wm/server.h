@@ -31,6 +31,7 @@ void wm_window_move(struct window *w, int x, int y); // a popup, to x, y on the 
 void wm_window_raise(struct window *w);              // as the app asked
 void wm_window_gone(struct window *w);
 void wm_window_position(const struct window *w, int *x, int *y); // where its contents are on the desktop
+void wm_room(int *width, int *height); // the most a window's contents can be, on the desktop, framed
 
 void wm_notify(struct window *from, const char *title, const char *body, const char *label, const char *command);
 void wm_settings_changed(void); // an app saved them

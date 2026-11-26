@@ -7,6 +7,7 @@
 #include <key_linux.h>
 #include <key_text.h>
 #include <libinput.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -268,23 +269,36 @@ struct gather {
 };
 
 // Each of the window's pixels, at the desktop's scale, from the nearest of the
-// surface's buffer, at its own: the same, or an X app's, at 1x, made twice the size.
+// surface's buffer: the part of it the surface shows, which may be cropped, and at
+// any size, as an app scales it, by its buffer scale or with viewporter, as Firefox
+// does, or an X app's, at 1x, made twice the size. In 16.16 fixed point, a desktop
+// pixel's middle, as a buffer's.
+static int64_t buffer_at(double start, double size, int surface_size, int at) {
+    return (int64_t)((start + (at + 0.5) * size / surface_size) * 65536);
+}
+
 static void copy_surface(struct wlr_surface *surface, int sx, int sy, void *data) {
     struct gather *g = data;
     struct surface *s = g->s;
     struct wlr_buffer *buffer = surface->current.buffer;
-    int scale = surface->current.scale > 0 ? surface->current.scale : 1, k = s->scale;
+    int width = surface->current.width, height = surface->current.height, k = s->scale;
+    struct wlr_fbox src;
     void *from;
     uint32_t format;
     size_t stride;
 
-    if (!buffer || !wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &from, &format, &stride))
+    if (!buffer || width <= 0 || height <= 0)
+        return;
+    wlr_surface_get_buffer_source_box(surface, &src);
+    if (src.width <= 0 || src.height <= 0
+        || !wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &from, &format, &stride))
         return;
     if (format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_ARGB8888) {
         bool alpha = format == DRM_FORMAT_ARGB8888 && s->translucent;
         int left = sx - g->origin_x, top = sy - g->origin_y;
         int x0 = g->box.x1 > left ? g->box.x1 : left, y0 = g->box.y1 > top ? g->box.y1 : top;
-        int x1 = left + buffer->width / scale, y1 = top + buffer->height / scale;
+        int x1 = left + width, y1 = top + height;
+        int64_t step = (int64_t)(src.width / (width * k) * 65536);
 
         x1 = x1 < g->box.x2 ? x1 : g->box.x2;
         y1 = y1 < g->box.y2 ? y1 : g->box.y2;
@@ -293,11 +307,14 @@ static void copy_surface(struct wlr_surface *surface, int sx, int sy, void *data
         x0 = x0 > 0 ? x0 : 0, y0 = y0 > 0 ? y0 : 0;
 
         for (int y = y0 * k; y < y1 * k; y++) {
-            const uint32_t *row = (const uint32_t *)((const uint8_t *)from + (size_t)((y - top * k) * scale / k) * stride);
+            int by = (int)(buffer_at(src.y, src.height, height * k, y - top * k) >> 16);
+            const uint32_t *row = (const uint32_t *)((const uint8_t *)from
+                                                     + (size_t)(by < buffer->height ? by : buffer->height - 1) * stride);
             uint32_t *to = s->pixels + (size_t)y * s->width * k;
+            int64_t bx = buffer_at(src.x, src.width, width * k, x0 * k - left * k);
 
-            for (int x = x0 * k; x < x1 * k; x++) {
-                uint32_t p = row[(x - left * k) * scale / k];
+            for (int x = x0 * k; x < x1 * k; x++, bx += step) {
+                uint32_t p = row[(bx >> 16) < buffer->width ? (bx >> 16) : buffer->width - 1];
                 uint32_t a = p >> 24;
 
                 // Wayland's alpha is how solid, with the colour already multiplied by it; wm's
@@ -343,10 +360,14 @@ static void gather(struct surface *s, struct wlr_surface *committed) {
                && wl_list_empty(&s->surface->current.subsurfaces_below)) {
         // With no other surfaces, only what the app says it changed.
         pixman_box32_t *b = pixman_region32_extents(&committed->buffer_damage);
-        int scale = committed->current.scale > 0 ? committed->current.scale : 1;
+        struct wlr_fbox src;
+        double across, down;
 
-        into.box = (pixman_box32_t){b->x1 / scale - g.x, b->y1 / scale - g.y, (b->x2 + scale - 1) / scale - g.x,
-                                    (b->y2 + scale - 1) / scale - g.y};
+        wlr_surface_get_buffer_source_box(committed, &src);
+        across = src.width > 0 ? committed->current.width / src.width : 1;
+        down = src.height > 0 ? committed->current.height / src.height : 1;
+        into.box = (pixman_box32_t){(int)floor((b->x1 - src.x) * across) - g.x, (int)floor((b->y1 - src.y) * down) - g.y,
+                                    (int)ceil((b->x2 - src.x) * across) - g.x, (int)ceil((b->y2 - src.y) * down) - g.y};
     }
     if (into.box.x2 <= into.box.x1 || into.box.y2 <= into.box.y1)
         return;
@@ -378,7 +399,14 @@ static void on_commit(struct wl_listener *l, void *data) {
 
     (void)data;
     if (s->toplevel && s->toplevel->base->initial_commit) {
-        // Apps choose their own first size, and wm draws the frame.
+        // Apps choose their own first size, and wm draws the frame, within the room
+        // there is, which apps that size themselves from the screen, as Firefox does,
+        // keep to.
+        int width, height;
+
+        wm_room(&width, &height);
+        if (wl_resource_get_version(s->toplevel->resource) >= 4) // configure_bounds' version
+            wlr_xdg_toplevel_set_bounds(s->toplevel, width, height);
         wlr_xdg_toplevel_set_size(s->toplevel, 0, 0);
         return;
     }
