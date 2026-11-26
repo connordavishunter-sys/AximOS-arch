@@ -1,0 +1,12 @@
+[Unit]
+Description=Set up pacman's keyring, so the live system can check what it downloads
+After=time-sync.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/pacman-key --init
+ExecStart=/usr/bin/pacman-key --populate
+
+[Install]
+WantedBy=multi-user.target

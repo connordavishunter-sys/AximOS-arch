@@ -86,6 +86,7 @@ make_partitions() {
 # What the live system has that the installed one shouldn't.
 live_files=(
     etc/systemd/system/aximos-live.service etc/systemd/system/sysinit.target.wants/aximos-live.service
+    etc/systemd/system/pacman-init.service etc/systemd/system/multi-user.target.wants/pacman-init.service
     etc/systemd/system/serial-getty@ttyS0.service.d etc/sudoers.d/live etc/sysusers.d/aximos-live.conf
     etc/tmpfiles.d/aximos-live.conf etc/systemd/journald.conf.d/volatile-storage.conf
     etc/mkinitcpio.conf.d/archiso.conf etc/machine-id

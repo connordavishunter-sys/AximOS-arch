@@ -39,9 +39,9 @@ try:
     assert vm.wait_wm('wm: polkit\'s agent', 60), vm.wm_log()
     check('installed systems update from AximOS\'s release', 'releases/download/packages' in vm.run('cat /etc/pacman.conf'),
           vm.run('cat /etc/pacman.conf'))
-    vm.run('pacman-key --init >/dev/null 2>&1; pacman-key --populate >/dev/null 2>&1', 120)  # as the installer does
-    check('and trust AximOS\'s key', 'AximOS packages' in vm.run('pacman-key --list-keys AximOS 2>&1', 30),
-          vm.run('pacman-key --list-keys 2>&1 | tail', 30))
+    vm.run('for i in $(seq 120); do systemctl is-active -q pacman-init && break; sleep 1; done', 130)
+    check('and trust AximOS\'s key, from boot', '[  full  ] AximOS packages' in vm.run('pacman-key --list-keys AximOS 2>&1', 30),
+          vm.run('systemctl status pacman-init 2>&1; pacman-key --list-keys 2>&1 | tail', 30))
     vm.run(f"printf '%s' '{CONF}' > /etc/pacman.conf")
     before = vm.run('pacman -Q aximos-desktop')
 
