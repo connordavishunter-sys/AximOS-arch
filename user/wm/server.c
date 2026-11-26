@@ -21,7 +21,10 @@
 #include <wlr/backend/libinput.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <wlr/render/allocator.h>
+#include <wlr/render/color.h>
 #include <wlr/render/wlr_renderer.h>
+#include <scenefx/render/fx_renderer/fx_renderer.h>
+#include <scenefx/types/wlr_scene.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
@@ -59,10 +62,37 @@
 #define URI_TYPE "text/uri-list"
 #define IMAGE_TYPE "image/png"
 
+// A part of the screen wm draws, in a buffer of its own in the scene, with a blur
+// behind it if it's glass. canvas is what wm draws, in its own format, at the
+// display's scale, and argb what the scene's given, as each part of it changes.
+struct pixels_buffer {
+    struct wlr_buffer base;
+    uint32_t *argb;
+};
+
+struct scene_part {
+    struct wlr_scene_tree *tree;
+    struct wlr_scene_blur *blur; // or NULL
+    struct wlr_scene_buffer *node;
+    struct pixels_buffer *buffer;
+    struct gui_canvas canvas;
+    int x, y, width, height, scale;
+};
+
 struct surface {
     struct wl_list link;
     struct window *window; // wm's, while it's shown
     struct wlr_surface *surface;
+    // In the scene, from the bottom: its shadow, a blur behind its title bar, or its
+    // contents if they're see-through, its frame, its contents, and while it's moving
+    // between places, a copy of it, which stands in for the rest.
+    struct wlr_scene_tree *tree, *contents;
+    struct wlr_scene_shadow *shadow;
+    struct wlr_scene_blur *blur;
+    struct wlr_scene_rect *border[3]; // left, right and bottom
+    struct scene_part *frame, *moving;
+    int contents_x, contents_y; // where wm last put its contents
+    int seen_width, seen_height; // its size, as wm last heard it
     struct wlr_xdg_toplevel *toplevel; // one of these three
     struct wlr_xdg_popup *popup;
     struct wlr_xwayland_surface *xsurface;
@@ -100,13 +130,13 @@ static struct server {
         output_destroy, request_cursor, request_shape, request_selection, request_primary, request_drag, start_drag,
         set_selection, new_decoration, motion, motion_absolute, button, axis, swipe_begin, swipe_update, swipe_end;
 
-    // The desktop, as wm draws it, and what's changed since the last frame.
+    // The scene: the desktop, windows, what's over them, and the cursor, each a tree.
     struct screen *screen;
-    struct wlr_buffer pixels;
-    bool pixels_made;
-    struct wlr_texture *texture;
-    pixman_region32_t changed;
-    bool wanted, waiting; // a frame's to be shown, or one's being shown
+    struct wlr_scene *scene;
+    struct wlr_scene_output *scene_output;
+    struct wlr_scene_output_layout *scene_layout;
+    struct wlr_scene_tree *layers[SERVER_LAYERS];
+    struct wlr_color_transform *night; // or NULL
     int scale;
 
     const struct input *input;
@@ -144,12 +174,14 @@ static uint32_t now_ms(void) {
     return (uint32_t)(t.tv_sec * 1000 + t.tv_nsec / 1000000);
 }
 
-// wm's own pixels, as a buffer wlroots can make a texture from.
+// A part's pixels, as a buffer the scene makes a texture from: premultiplied ARGB.
 static bool pixels_access(struct wlr_buffer *buffer, uint32_t flags, void **data, uint32_t *format, size_t *stride) {
-    (void)buffer, (void)flags;
-    *data = server.screen->pixels;
-    *format = DRM_FORMAT_XRGB8888;
-    *stride = server.screen->pitch;
+    struct pixels_buffer *b = wl_container_of(buffer, b, base);
+
+    (void)flags;
+    *data = b->argb;
+    *format = DRM_FORMAT_ARGB8888;
+    *stride = (size_t)buffer->width * 4;
     return true;
 }
 
@@ -158,13 +190,17 @@ static void pixels_end(struct wlr_buffer *buffer) {
 }
 
 static void pixels_destroy(struct wlr_buffer *buffer) {
-    (void)buffer;
+    struct pixels_buffer *b = wl_container_of(buffer, b, base);
+
+    free(b->argb);
+    free(b);
 }
 
 static const struct wlr_buffer_impl pixels_impl = {
     .destroy = pixels_destroy, .begin_data_ptr_access = pixels_access, .end_data_ptr_access = pixels_end};
 
-// The desktop's pixels, the output's size. A new texture is made for them when the size changes.
+// The screen's size, which wm lays the desktop out in, and its modes. Its pixels are
+// only for reading the screen back into.
 static bool new_pixels(void) {
     struct screen *s = server.screen;
     int width = server.output->width, height = server.output->height;
@@ -174,72 +210,136 @@ static bool new_pixels(void) {
         return false;
     free(s->pixels);
     *s = (struct screen){pixels, width, height, width * 4, !wl_list_empty(&server.output->modes)};
-    if (server.texture)
-        wlr_texture_destroy(server.texture);
-    server.texture = NULL;
-    if (server.pixels_made)
-        wlr_buffer_finish(&server.pixels);
-    wlr_buffer_init(&server.pixels, &pixels_impl, width, height);
-    server.pixels_made = true;
-    pixman_region32_union_rect(&server.changed, &server.changed, 0, 0, width, height);
     return true;
 }
 
-// Puts what changed on the screen, if the last frame's been shown.
-static void show_frame(void) {
-    struct wlr_output_state state;
-    struct wlr_render_pass *pass;
+static struct scene_part *part_in(struct wlr_scene_tree *parent) {
+    struct scene_part *p = calloc(1, sizeof(*p));
 
-    if (!server.output || server.waiting || !server.wanted)
-        return;
-    if (server.texture && !wlr_texture_update_from_buffer(server.texture, &server.pixels, &server.changed)) {
-        wlr_texture_destroy(server.texture);
-        server.texture = NULL;
+    if (!p || !(p->tree = wlr_scene_tree_create(parent))) {
+        free(p);
+        return NULL;
     }
-    if (!server.texture)
-        server.texture = wlr_texture_from_buffer(server.renderer, &server.pixels);
-    if (!server.texture)
+    p->node = wlr_scene_buffer_create(p->tree, NULL);
+    wlr_scene_node_set_enabled(&p->tree->node, false);
+    return p;
+}
+
+struct scene_part *server_part_new(enum server_layer layer) {
+    return part_in(server.layers[layer]);
+}
+
+void server_part_free(struct scene_part *p) {
+    if (!p)
         return;
-    wlr_output_state_init(&state);
-    pass = wlr_output_begin_render_pass(server.output, &state, NULL);
-    if (pass) {
-        wlr_render_pass_add_texture(pass, &(struct wlr_render_texture_options){
-                                              .texture = server.texture, .blend_mode = WLR_RENDER_BLEND_MODE_NONE});
-        if (wlr_render_pass_submit(pass) && wlr_output_commit_state(server.output, &state)) {
-            server.waiting = true;
-            server.wanted = false;
-            pixman_region32_clear(&server.changed);
+    wlr_scene_node_destroy(&p->tree->node); // which lets go of its buffer
+    if (p->buffer)
+        wlr_buffer_drop(&p->buffer->base);
+    free(p->canvas.pixels);
+    free(p);
+}
+
+struct gui_canvas *server_part_place(struct scene_part *p, int x, int y, int width, int height) {
+    int k = server.scale;
+
+    if (width <= 0 || height <= 0)
+        return NULL;
+    wlr_scene_node_set_position(&p->tree->node, x, y);
+    p->x = x, p->y = y;
+    if (width != p->width || height != p->height || k != p->scale || !p->buffer) {
+        struct pixels_buffer *b = calloc(1, sizeof(*b));
+        uint32_t *canvas = malloc((size_t)width * height * k * k * sizeof(uint32_t));
+
+        if (!b || !canvas || !(b->argb = calloc((size_t)width * height * k * k, sizeof(uint32_t)))) {
+            free(b ? b->argb : NULL), free(b), free(canvas);
+            return NULL;
+        }
+        for (size_t i = 0; i < (size_t)width * height * k * k; i++)
+            canvas[i] = 0xFF000000; // see-through, in wm's colours
+        wlr_buffer_init(&b->base, &pixels_impl, width * k, height * k);
+        wlr_scene_buffer_set_buffer(p->node, &b->base);
+        wlr_scene_buffer_set_dest_size(p->node, width, height);
+        if (p->buffer)
+            wlr_buffer_drop(&p->buffer->base);
+        p->buffer = b;
+        free(p->canvas.pixels);
+        p->canvas = (struct gui_canvas){canvas, width, height, width * k, k};
+        p->width = width, p->height = height, p->scale = k;
+        if (p->blur)
+            wlr_scene_blur_set_size(p->blur, width, height);
+    }
+    return &p->canvas;
+}
+
+void server_part_show(struct scene_part *p, bool shown) {
+    wlr_scene_node_set_enabled(&p->tree->node, shown && p->buffer);
+}
+
+void server_part_raise(struct scene_part *p) {
+    wlr_scene_node_raise_to_top(&p->tree->node);
+}
+
+void server_part_look(struct scene_part *p, int radius, float blur, float opacity) {
+    if (blur > 0 && !p->blur) {
+        p->blur = wlr_scene_blur_create(p->tree, p->width, p->height);
+        wlr_scene_node_lower_to_bottom(&p->blur->node);
+    }
+    if (p->blur) {
+        wlr_scene_node_set_enabled(&p->blur->node, blur > 0);
+        wlr_scene_blur_set_alpha(p->blur, blur);
+        wlr_scene_blur_set_corner_radius(p->blur, radius);
+    }
+    wlr_scene_buffer_set_opacity(p->node, opacity);
+}
+
+// wm's colours, whose top byte is how see-through, as the scene's: premultiplied.
+void server_part_drawn(struct scene_part *p, int x, int y, int width, int height) {
+    int k = p->scale, x0 = x < 0 ? 0 : x * k, y0 = y < 0 ? 0 : y * k;
+    int x1 = (x + width > p->width ? p->width : x + width) * k, y1 = (y + height > p->height ? p->height : y + height) * k;
+    pixman_region32_t damage;
+
+    if (!p->buffer || x1 <= x0 || y1 <= y0)
+        return;
+    for (int row = y0; row < y1; row++) {
+        const uint32_t *from = p->canvas.pixels + (size_t)row * p->canvas.stride;
+        uint32_t *to = p->buffer->argb + (size_t)row * p->width * k;
+
+        for (int col = x0; col < x1; col++) {
+            uint32_t c = from[col], solid = 255 - (c >> 24);
+
+            to[col] = solid == 255 ? 0xFF000000 | c
+                    : !solid       ? 0
+                                   : solid << 24 | ((c >> 16 & 0xFF) * solid / 255) << 16
+                                         | ((c >> 8 & 0xFF) * solid / 255) << 8 | (c & 0xFF) * solid / 255;
         }
     }
-    wlr_output_state_finish(&state);
+    pixman_region32_init_rect(&damage, x0, y0, x1 - x0, y1 - y0);
+    wlr_scene_buffer_set_buffer_with_damage(p->node, &p->buffer->base, &damage);
+    pixman_region32_fini(&damage);
 }
 
-// Each frame shown lets apps draw their next.
-static void frame_done(struct wlr_surface *surface, int sx, int sy, void *now) {
-    (void)sx, (void)sy;
-    wlr_surface_send_frame_done(surface, now);
-}
-
+// Each frame: the scene, drawn by the GPU where it's changed, then apps told it's
+// shown, so they draw their next.
 static void on_frame(struct wl_listener *l, void *data) {
-    struct surface *s;
     struct timespec now;
 
     (void)l, (void)data;
-    server.waiting = false;
-    show_frame();
+    if (!server.scene_output)
+        return;
+    wlr_scene_output_commit(server.scene_output,
+                            &(struct wlr_scene_output_state_options){.color_transform = server.night});
     clock_gettime(CLOCK_MONOTONIC, &now);
-    wl_list_for_each(s, &server.surfaces, link) {
-        if (s->surface)
-            wlr_surface_for_each_surface(s->surface, frame_done, &now);
-    }
+    wlr_scene_output_send_frame_done(server.scene_output, &now);
 }
 
 static void on_output_destroy(struct wl_listener *l, void *data) {
     (void)l, (void)data;
     wl_list_remove(&server.frame.link);
     wl_list_remove(&server.output_destroy.link);
+    if (server.scene_output)
+        wlr_scene_output_destroy(server.scene_output);
+    server.scene_output = NULL;
     server.output = NULL;
-    server.waiting = false;
 }
 
 // The first screen is wm's, at its preferred mode. Others are left off, for now.
@@ -247,6 +347,7 @@ static void on_new_output(struct wl_listener *l, void *data) {
     struct wlr_output *output = data;
     struct wlr_output_state state;
     struct wlr_output_mode *mode = wlr_output_preferred_mode(output);
+    struct wlr_output_layout_output *placed;
 
     (void)l;
     if (server.output || !wlr_output_init_render(output, server.allocator, server.renderer))
@@ -262,12 +363,14 @@ static void on_new_output(struct wl_listener *l, void *data) {
     }
     wlr_output_state_finish(&state);
     server.output = output;
-    server.waiting = true; // until that's shown
     server.frame.notify = on_frame;
     wl_signal_add(&output->events.frame, &server.frame);
     server.output_destroy.notify = on_output_destroy;
     wl_signal_add(&output->events.destroy, &server.output_destroy);
-    wlr_output_layout_add_auto(server.layout, output);
+    placed = wlr_output_layout_add_auto(server.layout, output);
+    server.scene_output = wlr_scene_output_create(server.scene, output);
+    if (placed && server.scene_output)
+        wlr_scene_output_layout_add_output(server.scene_layout, placed, server.scene_output);
     wlr_output_create_global(output, server.display);
 }
 
@@ -291,18 +394,32 @@ static void copy_surface(struct wlr_surface *surface, int sx, int sy, void *data
     struct gather *g = data;
     struct surface *s = g->s;
     struct wlr_buffer *buffer = surface->current.buffer;
+    struct wlr_texture *texture = surface->buffer ? surface->buffer->texture : NULL;
     int width = surface->current.width, height = surface->current.height, k = s->scale;
+    int buffer_width, buffer_height;
     struct wlr_fbox src;
-    void *from;
+    void *from = NULL, *read = NULL;
     uint32_t format;
     size_t stride;
 
-    if (!buffer || width <= 0 || height <= 0)
+    if (width <= 0 || height <= 0)
         return;
     wlr_surface_get_buffer_source_box(surface, &src);
-    if (src.width <= 0 || src.height <= 0
-        || !wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &from, &format, &stride))
+    if (src.width <= 0 || src.height <= 0)
         return;
+    // Its buffer while the app's still there, or else what the GPU has, read back.
+    if (buffer && wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ, &from, &format, &stride)) {
+        buffer_width = buffer->width, buffer_height = buffer->height;
+    } else if (texture && (read = malloc((size_t)texture->width * texture->height * 4))
+               && wlr_texture_read_pixels(texture, &(struct wlr_texture_read_pixels_options){
+                                                       .data = read, .format = DRM_FORMAT_ARGB8888,
+                                                       .stride = texture->width * 4})) {
+        from = read, format = DRM_FORMAT_ARGB8888, stride = (size_t)texture->width * 4, buffer = NULL;
+        buffer_width = texture->width, buffer_height = texture->height;
+    } else {
+        free(read);
+        return;
+    }
     if (format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_ARGB8888) {
         bool alpha = format == DRM_FORMAT_ARGB8888 && s->translucent;
         int left = sx - g->origin_x, top = sy - g->origin_y;
@@ -330,12 +447,12 @@ static void copy_surface(struct wlr_surface *surface, int sx, int sy, void *data
         for (int y = y0 * k; !(same && !alpha) && y < y1 * k; y++) {
             int by = (int)(buffer_at(src.y, src.height, height * k, y - top * k) >> 16);
             const uint32_t *row = (const uint32_t *)((const uint8_t *)from
-                                                     + (size_t)(by < buffer->height ? by : buffer->height - 1) * stride);
+                                                     + (size_t)(by < buffer_height ? by : buffer_height - 1) * stride);
             uint32_t *to = s->pixels + (size_t)y * s->width * k;
             int64_t bx = buffer_at(src.x, src.width, width * k, x0 * k - left * k);
 
             for (int x = x0 * k; x < x1 * k; x++, bx += step) {
-                uint32_t p = row[(bx >> 16) < buffer->width ? (bx >> 16) : buffer->width - 1];
+                uint32_t p = row[(bx >> 16) < buffer_width ? (bx >> 16) : buffer_width - 1];
                 uint32_t a = p >> 24;
 
                 // Wayland's alpha is how solid, with the colour already multiplied by it; wm's
@@ -350,7 +467,9 @@ static void copy_surface(struct wlr_surface *surface, int sx, int sy, void *data
             }
         }
     }
-    wlr_buffer_end_data_ptr_access(buffer);
+    if (buffer)
+        wlr_buffer_end_data_ptr_access(buffer);
+    free(read);
 }
 
 // The part of the window's contents geometry starts at, in its root surface.
@@ -444,6 +563,218 @@ static struct surface *root_of(struct wlr_surface *surface) {
     return root ? surface_of(root) : NULL;
 }
 
+// Where its contents' surfaces go: from the top left of the part the app says is its
+// window, which may leave out a shadow it draws, or all of an X window's surface.
+static void place_contents(struct surface *s) {
+    struct wlr_box g = geometry_of(s);
+
+    if (s->contents)
+        wlr_scene_node_set_position(&s->contents->node, s->contents_x - g.x, s->contents_y - g.y);
+}
+
+// The app drew. The scene shows it; wm hears if its size changed, to frame it, and
+// that its copy of it's out of date.
+static void contents_changed(struct surface *s) {
+    struct wlr_box g = geometry_of(s);
+    int width = g.width > 0 ? g.width : s->surface->current.width;
+    int height = g.height > 0 ? g.height : s->surface->current.height;
+
+    if (!s->window)
+        return;
+    place_contents(s);
+    if (width > 0 && height > 0 && (width != s->seen_width || height != s->seen_height)) {
+        s->seen_width = width, s->seen_height = height;
+        wm_window_size(s->window, width, height);
+    }
+    wm_window_changed(s->window);
+}
+
+static void scene_window_new(struct surface *s) {
+    if (s->tree || !(s->tree = wlr_scene_tree_create(server.layers[LAYER_WINDOWS])))
+        return;
+    s->shadow = wlr_scene_shadow_create(s->tree, 0, 0, 0, 0, (float[4]){0, 0, 0, 0});
+    s->blur = wlr_scene_blur_create(s->tree, 0, 0);
+    for (int i = 0; i < 3; i++)
+        s->border[i] = wlr_scene_rect_create(s->tree, 0, 0, (float[4]){0, 0, 0, 1});
+    s->contents = wlr_scene_subsurface_tree_create(s->tree, s->surface);
+    wlr_scene_node_set_enabled(&s->shadow->node, false);
+    wlr_scene_node_set_enabled(&s->blur->node, false);
+    wlr_scene_node_set_enabled(&s->tree->node, false);
+}
+
+static void scene_window_gone(struct surface *s) {
+    server_part_free(s->frame);
+    server_part_free(s->moving);
+    if (s->tree)
+        wlr_scene_node_destroy(&s->tree->node);
+    s->tree = s->contents = NULL, s->shadow = NULL, s->blur = NULL, s->frame = s->moving = NULL;
+    memset(s->border, 0, sizeof(s->border));
+}
+
+struct scene_part *server_window_frame(struct surface *s) {
+    if (!s->frame && s->tree && (s->frame = part_in(s->tree)))
+        wlr_scene_node_place_below(&s->frame->tree->node, &s->contents->node);
+    return s->frame;
+}
+
+struct scene_part *server_window_moving(struct surface *s) {
+    if (!s->moving && s->tree)
+        s->moving = part_in(s->tree); // over the rest
+    return s->moving;
+}
+
+// Its contents' corners rounded, as its frame's are: the buffers that reach them, of
+// the contents width by height, whose top left is at x, y in the contents tree.
+struct corners {
+    int x, y, width, height, radius;
+    bool top;
+};
+
+static void round_buffer(struct wlr_scene_buffer *buffer, int sx, int sy, void *data) {
+    const struct corners *c = data;
+    int width = buffer->dst_width ? buffer->dst_width : buffer->buffer ? buffer->buffer->width / server.scale : 0;
+    int height = buffer->dst_height ? buffer->dst_height : buffer->buffer ? buffer->buffer->height / server.scale : 0;
+    int left = sx - c->x, top = sy - c->y, right = left + width, bottom = top + height;
+    bool at_left = left <= 0, at_right = right >= c->width, at_top = c->top && top <= 0, at_bottom = bottom >= c->height;
+
+    wlr_scene_buffer_set_corner_radii(buffer, (struct fx_corner_radii){
+                                                  at_top && at_left ? c->radius : 0, at_top && at_right ? c->radius : 0,
+                                                  at_bottom && at_right ? c->radius : 0,
+                                                  at_bottom && at_left ? c->radius : 0});
+}
+
+static void round_contents(struct surface *s, const struct window_look *look) {
+    struct wlr_box g = geometry_of(s);
+    bool framed = look->title_height > 0;
+    struct corners c = {
+        .x = g.x, .y = g.y, .top = !framed,
+        .width = look->frame_width - 2 * look->border,
+        .height = look->frame_height - look->title_height - (framed ? look->border : 0),
+        .radius = look->radius > look->border ? look->radius - look->border : 0};
+
+    wlr_scene_node_for_each_buffer(&s->contents->node, round_buffer, &c);
+}
+
+void server_window_look(struct surface *s, const struct window_look *look) {
+    float black[4] = {0, 0, 0, look->shadow};
+
+    if (!s->tree)
+        return;
+    wlr_scene_node_set_enabled(&s->tree->node, look->shown);
+    if (!look->shown)
+        return;
+    s->contents_x = look->x, s->contents_y = look->y;
+    place_contents(s);
+    round_contents(s, look);
+    wlr_scene_node_set_enabled(&s->contents->node, !look->moving);
+    if (s->frame)
+        wlr_scene_node_set_enabled(&s->frame->tree->node, !look->moving);
+    if (s->moving)
+        wlr_scene_node_set_enabled(&s->moving->tree->node, look->moving);
+
+    // A soft shadow, a little bigger than the frame, and a blur behind its title bar, or
+    // its contents if they're see-through.
+    wlr_scene_node_set_enabled(&s->shadow->node, look->shadow > 0 && !look->moving);
+    if (look->shadow > 0) {
+        int spread = look->shadow_size;
+
+        wlr_scene_node_set_position(&s->shadow->node, look->frame_x - spread, look->frame_y - spread + look->shadow_drop);
+        wlr_scene_shadow_set_size(s->shadow, look->frame_width + 2 * spread, look->frame_height + 2 * spread);
+        wlr_scene_shadow_set_corner_radius(s->shadow, look->radius);
+        wlr_scene_shadow_set_blur_sigma(s->shadow, spread / 2.0f);
+        wlr_scene_shadow_set_color(s->shadow, black);
+    }
+    // The border down its sides and along its bottom; the title bar's frame has the top.
+    float color[4] = {(look->border_color >> 16 & 0xFF) / 255.0f, (look->border_color >> 8 & 0xFF) / 255.0f,
+                      (look->border_color & 0xFF) / 255.0f, 1};
+    int top = look->frame_y + look->title_height, bottom = look->frame_y + look->frame_height, b = look->border;
+    struct wlr_box sides[3] = {{look->frame_x, top, b, bottom - top},
+                               {look->frame_x + look->frame_width - b, top, b, bottom - top},
+                               {look->frame_x, bottom - b, look->frame_width, b}};
+
+    for (int i = 0; i < 3; i++) {
+        wlr_scene_node_set_enabled(&s->border[i]->node, b > 0 && !look->moving);
+        wlr_scene_node_set_position(&s->border[i]->node, sides[i].x, sides[i].y);
+        wlr_scene_rect_set_size(s->border[i], sides[i].width, sides[i].height);
+        wlr_scene_rect_set_color(s->border[i], color);
+    }
+    bool blur = ((look->blur_title && look->title_height > 0) || look->blur_contents) && !look->moving;
+
+    wlr_scene_node_set_enabled(&s->blur->node, blur);
+    if (blur) {
+        int height = look->blur_contents ? look->frame_height : look->title_height;
+
+        wlr_scene_node_set_position(&s->blur->node, look->frame_x, look->frame_y);
+        wlr_scene_blur_set_size(s->blur, look->frame_width, height);
+        wlr_scene_blur_set_corner_radii(s->blur, (struct fx_corner_radii){look->radius, look->radius,
+                                                                          look->blur_contents ? look->radius : 0,
+                                                                          look->blur_contents ? look->radius : 0});
+    }
+}
+
+void server_windows_order(struct surface *const *bottom_up, int count) {
+    for (int i = 0; i < count; i++) {
+        if (bottom_up[i]->tree)
+            wlr_scene_node_raise_to_top(&bottom_up[i]->tree->node);
+    }
+}
+
+void server_night(int strength) {
+    uint16_t red[256], green[256], blue[256];
+
+    if (server.night)
+        wlr_color_transform_unref(server.night);
+    server.night = NULL;
+    for (int i = 0; strength > 0 && i < 256; i++) {
+        red[i] = i * 257;
+        green[i] = (i * (256 - strength * 72 / 100) >> 8) * 257;
+        blue[i] = (i * (256 - strength * 184 / 100) >> 8) * 257;
+    }
+    if (strength > 0)
+        server.night = wlr_color_transform_init_lut_3x1d(256, red, green, blue);
+    if (server.scene_output)
+        wlr_damage_ring_add_whole(&server.scene_output->damage_ring);
+    if (server.output)
+        wlr_output_schedule_frame(server.output);
+}
+
+void server_window_read(struct surface *s) {
+    gather(s, NULL);
+}
+
+// The scene, all drawn into a buffer that isn't shown, and read back. The next frame
+// shown is all drawn again, as this one isn't one the scene can build on.
+bool server_read_screen(struct gui_canvas *into) {
+    struct wlr_output_state state;
+    struct wlr_texture *texture = NULL;
+    bool ok = false;
+
+    if (!server.scene_output)
+        return false;
+    wlr_damage_ring_add_whole(&server.scene_output->damage_ring);
+    wlr_output_state_init(&state);
+    if (wlr_scene_output_build_state(server.scene_output, &state, NULL) && state.buffer
+        && (texture = wlr_texture_from_buffer(server.renderer, state.buffer))) {
+        int width = (int)texture->width < into->width * into->scale ? (int)texture->width : into->width * into->scale;
+        int height = (int)texture->height < into->height * into->scale ? (int)texture->height : into->height * into->scale;
+
+        ok = wlr_texture_read_pixels(texture, &(struct wlr_texture_read_pixels_options){
+                                                  .data = into->pixels, .format = DRM_FORMAT_XRGB8888,
+                                                  .stride = into->stride * 4,
+                                                  .src_box = {0, 0, width, height}});
+        for (int y = 0; ok && y < height; y++) {
+            for (int x = 0; x < width; x++)
+                into->pixels[(size_t)y * into->stride + x] &= 0xFFFFFF; // solid, in wm's colours
+        }
+        wlr_texture_destroy(texture);
+    }
+    wlr_output_state_finish(&state);
+    wlr_damage_ring_add_whole(&server.scene_output->damage_ring);
+    if (server.output)
+        wlr_output_schedule_frame(server.output);
+    return ok;
+}
+
 static void on_commit(struct wl_listener *l, void *data) {
     struct surface *s = wl_container_of(l, s, commit);
 
@@ -471,9 +802,7 @@ static void on_commit(struct wl_listener *l, void *data) {
         wlr_xdg_popup_unconstrain_from_box(s->popup, &desktop);
         return;
     }
-    gather(s, s->surface);
-    if (server.output)
-        wlr_output_schedule_frame(server.output);
+    contents_changed(s);
 }
 
 // A subsurface committing changes its window.
@@ -503,11 +832,8 @@ static void on_subsurface_commit(struct wl_listener *l, void *data) {
     struct surface *s = root_of(sub->surface);
 
     (void)data;
-    if (s && s->surface != sub->surface) {
-        gather(s, NULL);
-        if (server.output)
-            wlr_output_schedule_frame(server.output);
-    }
+    if (s && s->surface != sub->surface && s->window)
+        wm_window_changed(s->window);
 }
 
 static void on_new_surface(struct wl_listener *l, void *data) {
@@ -561,11 +887,13 @@ static void on_map(struct wl_listener *l, void *data) {
     }
     wm_window_title(s->window, title_of(s));
     wm_window_app(s->window, app_of(s));
-    gather(s, NULL);
-    int at_x, at_y;
-
-    wm_window_position(s->window, &at_x, &at_y);
-    printf("wm: %s opened a window, %dx%d at %d %d\n", app_of(s), s->width, s->height, at_x, at_y);
+    s->seen_width = g.width > 0 ? g.width : s->surface->current.width;
+    s->seen_height = g.height > 0 ? g.height : s->surface->current.height;
+    scene_window_new(s);
+    wm_window_position(s->window, &s->contents_x, &s->contents_y);
+    place_contents(s);
+    printf("wm: %s opened a window, %dx%d at %d %d\n", app_of(s), s->seen_width, s->seen_height, s->contents_x,
+           s->contents_y);
 }
 
 static void on_unmap(struct wl_listener *l, void *data) {
@@ -575,6 +903,7 @@ static void on_unmap(struct wl_listener *l, void *data) {
     if (s->window)
         wm_window_gone(s->window);
     s->window = NULL;
+    scene_window_gone(s);
 }
 
 static void on_title(struct wl_listener *l, void *data) {
@@ -606,6 +935,7 @@ static void on_destroy(struct wl_listener *l, void *data) {
     (void)data;
     if (s->window)
         wm_window_gone(s->window);
+    scene_window_gone(s);
     if (s->surface) {
         wl_list_remove(&s->map.link);
         wl_list_remove(&s->unmap.link);
@@ -1780,7 +2110,6 @@ static bool open_server(struct screen *screen) {
     server.read_fd = -1;
     server.repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT;
     server.repeat_rate = KEYBOARD_REPEAT_RATE_DEFAULT;
-    pixman_region32_init(&server.changed);
     wl_list_init(&server.surfaces);
     wl_list_init(&server.shells);
     wl_list_init(&server.keyboards);
@@ -1790,19 +2119,24 @@ static bool open_server(struct screen *screen) {
         fprintf(stderr, "wm: no screen to show it on, nor a seat to take one from\n");
         return false;
     }
-    if (!(server.renderer = wlr_renderer_autocreate(server.backend))
+    // SceneFX's renderer, which draws blur, shadows and rounded corners, and the scene.
+    if (!(server.renderer = fx_renderer_create(server.backend))
         || !(server.allocator = wlr_allocator_autocreate(server.backend, server.renderer))) {
         fprintf(stderr, "wm: can't draw on the screen\n");
         return false;
     }
-    wlr_shm_create(server.display, 1, (uint32_t[]){DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888}, 2);
-    server.compositor = wlr_compositor_create(server.display, 6, NULL); // apps' pixels are read, not made textures
+    wlr_renderer_init_wl_display(server.renderer, server.display); // apps' buffers, shared memory or the GPU's
+    server.compositor = wlr_compositor_create(server.display, 6, server.renderer);
+    server.scene = wlr_scene_create();
+    for (int i = 0; i < SERVER_LAYERS; i++)
+        server.layers[i] = wlr_scene_tree_create(&server.scene->tree);
     watch(&server.compositor->events.new_surface, &new_surface_listener, on_new_surface);
     wlr_subcompositor_create(server.display);
     wlr_data_device_manager_create(server.display);
     wlr_primary_selection_v1_device_manager_create(server.display);
     wlr_viewporter_create(server.display);
     server.layout = wlr_output_layout_create(server.display);
+    server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.layout);
     wlr_xdg_output_manager_v1_create(server.display, server.layout);
     watch(&server.backend->events.new_output, &server.new_output, on_new_output);
 
@@ -1901,18 +2235,17 @@ static void set_scale(int scale) {
     wl_list_for_each(sub, &all_surfaces, link) wlr_surface_set_preferred_buffer_scale(sub->surface, scale);
     wl_list_for_each(s, &server.surfaces, link) {
         if (s->window)
-            gather(s, NULL);
+            wm_window_changed(s->window);
     }
 }
 
+// What wm draws goes to the scene in parts, which shows it when it next draws.
 static void changed(int x, int y, int width, int height) {
-    pixman_region32_union_rect(&server.changed, &server.changed, x, y, width, height);
+    (void)x, (void)y, (void)width, (void)height;
 }
 
 static void show(void) {
-    server.wanted = true;
     place_x_windows();
-    show_frame();
 }
 
 static int poll_fds(struct pollfd *fds) {

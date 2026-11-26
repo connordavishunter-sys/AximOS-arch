@@ -31,6 +31,8 @@ void wm_window_move(struct window *w, int x, int y); // a popup, to x, y on the 
 void wm_window_raise(struct window *w);              // as the app asked
 void wm_window_gone(struct window *w);
 void wm_window_position(const struct window *w, int *x, int *y); // where its contents are on the desktop
+void wm_window_size(struct window *w, int width, int height); // the app drew at a new size
+void wm_window_changed(struct window *w);                     // it drew, so wm's copy's out of date
 void wm_room(int *width, int *height); // the most a window's contents can be, on the desktop, framed
 
 void wm_notify(struct window *from, const char *title, const char *body, const char *label, const char *command);
@@ -66,6 +68,57 @@ bool server_start_login(const char *path, const char *option);
 
 // Puts what wm has on the clipboard: text, or a picture width by height, 0x00RRGGBB.
 void server_set_clipboard(const char *data, size_t length, int width, int height);
+
+// The scene, which the GPU draws: from the bottom, the desktop, the windows, what's
+// over them, and the cursor. What wm draws itself goes in parts, each a buffer of its
+// own, uploaded only when it changes, and apps' windows straight from their buffers.
+enum server_layer { LAYER_DESKTOP, LAYER_WINDOWS, LAYER_OVER, LAYER_CURSOR, SERVER_LAYERS };
+
+struct scene_part;
+struct scene_part *server_part_new(enum server_layer layer);
+void server_part_free(struct scene_part *p);
+// Where it is, in the desktop's pixels, giving the canvas wm draws it on, at the
+// display's scale, which starts see-through when its size changes, or NULL if there's
+// no room for it.
+struct gui_canvas *server_part_place(struct scene_part *p, int x, int y, int width, int height);
+void server_part_show(struct scene_part *p, bool shown);
+void server_part_raise(struct scene_part *p); // over the rest of its layer
+// Glass: a blur behind it, alpha of it, 0 for none, with corners of radius; and how
+// solid all of it is.
+void server_part_look(struct scene_part *p, int radius, float blur, float opacity);
+// What wm drew, in part of it, from its top left, in the desktop's pixels, to show.
+void server_part_drawn(struct scene_part *p, int x, int y, int width, int height);
+
+// A window, as wm places and draws it: its contents, from the app, and around them
+// its frame, a part wm draws, its shadow, and a blur behind its title bar, or behind
+// contents that are see-through. While it moves between places, a copy of it, which
+// wm draws from wm_window_pixels' copy, stands in for all of it.
+struct window_look {
+    bool shown;
+    int x, y; // its contents' top left
+    int frame_x, frame_y, frame_width, frame_height;
+    int radius;          // of the frame's corners, 0 for square
+    float shadow;        // how dark its shadow is, 0 for none
+    int shadow_size, shadow_drop; // how far around the frame it spreads, and how far down it's moved
+    int title_height;    // its title bar's, which the frame part is, from the frame's top
+    bool blur_title;     // blurred behind, as glass
+    bool blur_contents;  // see-through contents, blurred behind
+    int border;          // its width, down the sides and along the bottom, under the title bar
+    uint32_t border_color; // 0xRRGGBB
+    bool moving;         // shown by its copy instead
+};
+void server_window_look(struct surface *s, const struct window_look *look);
+struct scene_part *server_window_frame(struct surface *s);
+struct scene_part *server_window_moving(struct surface *s);
+void server_windows_order(struct surface *const *bottom_up, int count);
+// The window's contents, read back from the GPU into wm's copy, by wm_window_pixels.
+void server_window_read(struct surface *s);
+// The night light: strength out of 100 of the blue taken away, and less of the green,
+// from all of the screen, by the GPU, or 0 for none.
+void server_night(int strength);
+
+// The screen as it's shown, into a canvas its size, at its scale.
+bool server_read_screen(struct gui_canvas *into);
 
 // Gives the file wm's dragging from the desktop to the app whose window the cursor's
 // over, as that app would have it from another's drag, or false if there's none.

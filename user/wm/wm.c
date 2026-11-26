@@ -181,6 +181,9 @@ struct window {
     struct rect anim_from, anim_to; // where it was going as of the last frame
     struct gui_canvas layer;
     bool copy_stale; // changed since layer was drawn, for the overview or a preview
+    bool contents_stale; // the app's drawn since canvas was read back from the GPU
+    int frame_width, frame_scale; // as its title bar was last drawn, in its part
+    bool frame_stale;
 };
 
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
@@ -191,6 +194,9 @@ enum { EDGE_LEFT = 1, EDGE_RIGHT = 2, EDGE_TOP = 4, EDGE_BOTTOM = 8 };
 // as the display is. Every canvas wm draws on is at this scale, apps' windows too.
 static struct gui_canvas screen;
 static const struct display *display;
+static bool drawing_part; // in a part of the scene, over what the GPU draws, not over wm's own
+static void desktop_changed(struct rect r);
+static void damage_desktop(struct rect r);
 static struct screen output;
 static int scale = 1;
 
@@ -443,16 +449,6 @@ static bool visible(const struct window *w) {
     return !w->minimized && on_workspace(w) && (!locked || w->login);
 }
 
-// Whether a window hides all of a rectangle: its frame does, but for the title
-// bar, which shows a little of what's under it, and the rounded corners.
-static bool covers(const struct window *w, struct rect r) {
-    struct rect f = frame_of(w);
-    int top = w->bare ? RADIUS : TITLE_HEIGHT + BORDER;
-
-    return visible(w) && !see_through(w) && !w->anim_ms && r.x >= f.x && r.y >= f.y + top && r.x + r.width <= f.x + f.width
-        && r.y + r.height <= f.y + f.height - RADIUS;
-}
-
 static bool overlaps(struct rect a, struct rect b) {
     return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
@@ -485,6 +481,8 @@ static void add_damage(struct rect r) {
         r.height = screen.height - r.y;
     if (r.width <= 0 || r.height <= 0)
         return;
+    if (r.x == 0 && r.y == 0 && r.width == screen.width && r.height == screen.height)
+        desktop_changed(r);
 
     // A rectangle that overlaps another goes in with it when the two together are
     // no bigger than they are apart, as when a window moves a little, so that the
@@ -531,12 +529,8 @@ static struct rect drag_rect(void) {
     return (struct rect){cursor_x + 10, cursor_y + 14, ICON_SIZE, ICON_SIZE};
 }
 
+// The cursor, and a dragged file's icon, are parts of their own, which are moved.
 static void damage_cursor(void) {
-    struct rect r = cursor_rect();
-
-    add_damage((struct rect){r.x - 1, r.y - 1, r.width + 2, r.height + 2});
-    if (drag_file[0])
-        add_damage(drag_rect());
 }
 
 // How dark a shadow is by how far left or right, and up or down, a point is from
@@ -682,7 +676,7 @@ static uint32_t average(uint32_t rb, uint32_t g, int taps) {
 // pixels away, across then down, with sums that move along, so it costs as much
 // however far it reaches. In the display's pixels.
 static void blur(struct gui_canvas *c, int x, int y, int width, int height) {
-    if (!settings.blur || !settings.transparency)
+    if (!settings.blur || !settings.transparency || drawing_part)
         return;
     static uint32_t *across;
     static size_t size;
@@ -787,7 +781,8 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     if (round)
         keep_corners(c, frame, ox, oy, kept);
     if (w->bare) {
-        draw_contents(c, w, ox, oy);
+        if (!drawing_part)
+            draw_contents(c, w, ox, oy);
         round_corners(c, frame, ox, oy, kept, GUI_NONE);
         return;
     }
@@ -820,7 +815,8 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     gui_fill(c, maximize.x + 5 - ox, maximize.y + 6 - oy, 6, 5, BUTTON_COLOR);
     gui_fill_rounded(c, minimize.x - ox, minimize.y - oy, BUTTON_SIZE, BUTTON_SIZE, SMALL_RADIUS, BUTTON_COLOR);
     gui_fill(c, minimize.x + 4 - ox, minimize.y + 11 - oy, 8, 2, TITLE_TEXT);
-    draw_contents(c, w, ox, oy);
+    if (!drawing_part) // in the scene, the app's surfaces are its contents
+        draw_contents(c, w, ox, oy);
     if (round)
         round_corners(c, frame, ox, oy, kept, BORDER_COLOR);
 }
@@ -998,9 +994,14 @@ static struct rect button_for(const struct window *w) {
 }
 
 // Draws a window, at full size, into a layer the size of its frame.
-static bool fill_layer(struct gui_canvas *layer, const struct window *w) {
+static bool fill_layer(struct gui_canvas *layer, struct window *w) {
     struct rect f = frame_of(w);
 
+    // Its contents are the GPU's, so wm's copy is read back if the app's drawn since.
+    if (w->contents_stale) {
+        w->contents_stale = false;
+        server_window_read(w->surface);
+    }
     if (layer->width != f.width || layer->height != f.height || layer->scale != scale) {
         uint32_t *pixels = realloc(layer->pixels, (size_t)f.width * f.height * scale * scale * sizeof(uint32_t));
 
@@ -1098,7 +1099,7 @@ static void reframe(struct window *w, struct rect from) {
 }
 
 // Leaves a copy of a window behind, going from its frame to a rectangle.
-static void depart(const struct window *w, struct rect to, int ms) {
+static void depart(struct window *w, struct rect to, int ms) {
     struct ghost *g = &ghosts[ghost_count];
 
     if (!settings.animations || w->bare || !visible(w) || ghost_count == MAX_WINDOWS)
@@ -1107,15 +1108,6 @@ static void depart(const struct window *w, struct rect to, int ms) {
                         .start = now_ms(), .from = frame_of(w), .to = to};
     if (fill_layer(&g->layer, w))
         ghost_count++;
-}
-
-static void draw_ghosts(struct gui_canvas *c, int ox, int oy) {
-    for (int i = 0; i < ghost_count; i++) {
-        const struct ghost *g = &ghosts[i];
-        int t = ease_in(progress(g->start, g->ms));
-
-        draw_layer(c, &g->layer, between(g->from, g->to, t), 256 - t, g->shadow, g->rounded, g->translucent, ox, oy);
-    }
 }
 
 // Moves each animation on a frame, returning whether any has further to go.
@@ -3595,7 +3587,7 @@ static void load_desktop(bool always) {
     if (same)
         return;
     for (int i = 0; i < desktop_count; i++) {
-        add_damage(desktop_cell(i));
+        damage_desktop(desktop_cell(i));
         gui_image_free(&desktop_items[i].picture);
     }
     memcpy(desktop_items, found, count * sizeof(*found));
@@ -3608,7 +3600,7 @@ static void load_desktop(bool always) {
 
         desktop_path(i, path);
         make_picture(&desktop_items[i], path);
-        add_damage(desktop_cell(i));
+        damage_desktop(desktop_cell(i));
         printf(" %s", desktop_items[i].name);
     }
     printf("\n");
@@ -3660,10 +3652,10 @@ static void draw_desktop(struct gui_canvas *c, int ox, int oy) {
 
 static void select_desktop_item(int index) {
     if (desktop_selected >= 0)
-        add_damage(desktop_cell(desktop_selected));
+        damage_desktop(desktop_cell(desktop_selected));
     desktop_selected = index;
     if (index >= 0)
-        add_damage(desktop_cell(index));
+        damage_desktop(desktop_cell(index));
 }
 
 // Renaming what's on the desktop where its name's shown, as Windows does: the name
@@ -3694,7 +3686,7 @@ static void damage_rename(void) {
 
     if (i >= 0) {
         add_damage(rename_field(i));
-        add_damage(desktop_cell(i));
+        damage_desktop(desktop_cell(i));
     }
 }
 
@@ -3916,10 +3908,10 @@ static void desktop_drop(void) {
     }
     if (there >= 0)
         return;
-    add_damage(desktop_cell(desktop_dragged));
+    damage_desktop(desktop_cell(desktop_dragged));
     item->column = column;
     item->row = row;
-    add_damage(desktop_cell(desktop_dragged));
+    damage_desktop(desktop_cell(desktop_dragged));
     save_layout();
     printf("wm: moved %s to %d %d\n", item->name, column, row);
 }
@@ -3982,6 +3974,7 @@ static void fade_screen(bool hold) {
         return;
     screen_fade.width = screen.width;
     screen_fade.height = screen.height;
+    server_read_screen(&screen);
     for (int y = 0; y < screen.height * scale; y++)
         memcpy(screen_fade.was + (long)y * screen.width * scale, screen.pixels + (long)y * screen.stride,
                screen.width * scale * sizeof(uint32_t));
@@ -4455,15 +4448,10 @@ static void choosing_moved(void) {
 }
 
 // Menus and the taskbar's panels fade in as they slide FLYOUT_SLIDE towards the
-// taskbar, and fade out sliding the other way, from a copy of how they looked.
+// taskbar, and fade out sliding the other way. Each is drawn once, and the GPU moves
+// and fades its part.
 #define FLYOUT_MS 150
 #define FLYOUT_SLIDE 8
-
-static struct {
-    struct gui_canvas copy; // of the screen around it, from at
-    struct rect at, r;
-    int64_t start;
-} flyout_ghost;
 
 // Which way away from the taskbar is, down or up, as 1 or -1.
 static int from_bar(void) {
@@ -4474,278 +4462,425 @@ static int flyout_progress(int64_t start) {
     return settings.animations ? progress(start, FLYOUT_MS) : 256;
 }
 
-// Draws a flyout that opened at start, shifted and mixed with what's under it.
-static void draw_flyout(struct gui_canvas *c, struct rect r, int64_t start,
-                        void (*draw)(struct gui_canvas *, int, int, int), int arg, int ox, int oy) {
-    static uint32_t *under;
-    static size_t size;
-    int t = ease_out(flyout_progress(start)), dy = (256 - t) * FLYOUT_SLIDE / 256 * from_bar();
-    int x0 = r.x - ox < 0 ? 0 : r.x - ox, x1 = r.x + r.width - ox > c->width ? c->width : r.x + r.width - ox;
-    int y0 = r.y + dy - oy < 0 ? 0 : r.y + dy - oy, y1 = r.y + dy + r.height - oy > c->height ? c->height : r.y + dy + r.height - oy;
-    size_t needed = x1 > x0 && y1 > y0 ? (size_t)(x1 - x0) * (y1 - y0) * scale * scale : 0;
+// What wm draws, in the scene. The desktop, each window's title bar and, while it
+// moves, its copy, and the parts over the windows, each drawn in a part of its own,
+// where what's changed overlaps it, by its draw_ function, with its offset. Over the
+// windows, from the bottom:
+enum {
+    PIECE_GHOSTS,                                // closing windows, fading
+    PIECE_OVERVIEW = PIECE_GHOSTS + MAX_WINDOWS, // all the windows, side by side
+    PIECE_SNAP, PIECE_TASKBAR,
+    PIECE_NOTICES,
+    PIECE_OSD = PIECE_NOTICES + MAX_NOTICES,
+    PIECE_MENU, PIECE_SUBMENU, PIECE_PANEL, PIECE_PREVIEW, PIECE_LAYOUTS,
+    PIECE_LEAVING, // a flyout that's closed, fading out
+    PIECE_SWITCHER, PIECE_DRAGGED, PIECE_AUTH, PIECE_CHOOSING, PIECE_FADE,
+    PIECES
+};
 
-    if (t == 256 || !needed) {
-        draw(c, arg, ox, oy - dy);
-        return;
-    }
-    if (needed > size) {
-        uint32_t *bigger = realloc(under, needed * sizeof(*under));
+struct piece {
+    struct scene_part *part;
+    struct rect at;   // where it's drawn, before it's moved by dx, dy
+    bool shown;
+    int dx, dy;       // as a flyout slides
+    float opacity, blur;
+    int radius;
+    void (*draw)(struct gui_canvas *c, int ox, int oy, int arg);
+    int arg;
+};
 
-        if (!bigger) {
-            draw(c, arg, ox, oy - dy);
-            return;
-        }
-        under = bigger, size = needed;
-    }
-    x0 *= scale, x1 *= scale, y0 *= scale, y1 *= scale; // in the display's pixels
-    for (int y = y0; y < y1; y++)
-        memcpy(under + (size_t)(y - y0) * (x1 - x0), c->pixels + (long)y * c->stride + x0, (x1 - x0) * sizeof(*under));
-    draw(c, arg, ox, oy - dy);
-    for (int y = y0; y < y1; y++) {
-        uint32_t *row = c->pixels + (long)y * c->stride, *was = under + (size_t)(y - y0) * (x1 - x0);
+static struct piece pieces[PIECES], desktop_piece, cursor_piece;
+static bool cursor_changed;
+static struct rect desktop_damage[MAX_DAMAGE];
+static int desktop_damage_count;
 
-        for (int x = x0; x < x1; x++)
-            row[x] = gui_mix(was[x - x0], row[x], t);
+static struct {
+    struct rect r;
+    int64_t start;
+    bool going;
+} flyout_ghost;
+
+// The desktop's own changes, which are all that draw it again, as all of it's
+// uploaded each time.
+static void desktop_changed(struct rect r) {
+    if (desktop_damage_count == MAX_DAMAGE)
+        desktop_damage_count = 0, r = (struct rect){0, 0, screen.width, screen.height};
+    desktop_damage[desktop_damage_count++] = r;
+}
+
+static void damage_desktop(struct rect r) {
+    add_damage(r);
+    desktop_changed(r);
+}
+
+static void draw_desktop_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    int hint_y = desktop().y + desktop().height - 2 * GUI_CHAR_HEIGHT;
+
+    (void)arg;
+    if (wallpaper.pixels)
+        gui_copy(c, 0, 0, &wallpaper, ox, oy, c->width, c->height);
+    else
+        gui_fill(c, 0, 0, c->width, c->height, DESKTOP_COLOR);
+    if (!locked) {
+        gui_text(c, GUI_CHAR_WIDTH - ox, hint_y - oy, HINT, HINT_COLOR, 1);
+        draw_desktop(c, ox, oy);
     }
 }
 
-static void draw_area(struct rect r, struct gui_canvas c);
+static void draw_ghost_piece(struct gui_canvas *c, int ox, int oy, int i) {
+    const struct ghost *g = &ghosts[i];
+    int t = ease_in(progress(g->start, g->ms));
 
-// Keeps a copy of a flyout as it closes, to fade out.
+    draw_layer(c, &g->layer, between(g->from, g->to, t), 256 - t, g->shadow, g->rounded, g->translucent, ox, oy);
+}
+
+static void draw_overview_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_overview(c, ox, oy);
+}
+
+static void draw_snap_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_snap(c, ox, oy);
+}
+
+static void draw_taskbar_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_taskbar(c, ox, oy);
+}
+
+static void draw_notices_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_notices(c, ox, oy); // the others are outside it
+}
+
+static void draw_osd_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_osd(c, ox, oy);
+}
+
+static void draw_panel_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    draw_open_panel(c, arg, ox, oy);
+}
+
+static void draw_menu_piece(struct gui_canvas *c, int ox, int oy, int level) {
+    draw_popup(c, level, ox, oy);
+}
+
+static void draw_preview_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    draw_preview(c, arg, ox, oy);
+}
+
+static void draw_layouts_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    draw_layouts(c, arg, ox, oy);
+}
+
+static void draw_switcher_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_switcher(c, ox, oy);
+}
+
+static void draw_dragged_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    struct rect d = drag_rect();
+
+    (void)arg;
+    gui_draw_image(c, d.x - ox, d.y - oy, drag_icon);
+}
+
+static void draw_auth_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_auth(c, ox, oy);
+}
+
+static void draw_choosing_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_choosing(c, ox, oy);
+}
+
+// The screen as it was, which fades to how it is.
+static void draw_fade_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    struct gui_canvas was = {screen_fade.was, screen.width, screen.height, screen.width * scale, scale};
+
+    (void)arg;
+    gui_copy(c, 0, 0, &was, ox, oy, c->width, c->height);
+}
+
+static void draw_cursor_piece(struct gui_canvas *c, int ox, int oy, int arg) {
+    (void)arg;
+    draw_cursor(c, ox, oy);
+}
+
+static void draw_frame_piece(struct gui_canvas *c, int ox, int oy, int i) {
+    draw_window(c, windows[i], ox, oy);
+}
+
+static void draw_moving_piece(struct gui_canvas *c, int ox, int oy, int i) {
+    struct window *w = windows[i];
+    int alpha;
+    struct rect now = arriving(w, &alpha);
+
+    draw_layer(c, &w->layer, now, alpha, w->shadow, rounded(w), see_through(w), ox, oy);
+}
+
+// The part of a part that's changed, drawn: from see-through, but for the desktop.
+static void draw_in(struct scene_part *part, struct gui_canvas *canvas, struct rect at, struct rect r, bool clear,
+                    void (*draw)(struct gui_canvas *, int, int, int), int arg) {
+    int x0 = r.x > at.x ? r.x : at.x, y0 = r.y > at.y ? r.y : at.y;
+    int x1 = r.x + r.width < at.x + at.width ? r.x + r.width : at.x + at.width;
+    int y1 = r.y + r.height < at.y + at.height ? r.y + r.height : at.y + at.height;
+    struct gui_canvas view;
+
+    if (!part || !canvas || x1 <= x0 || y1 <= y0)
+        return;
+    view = gui_part(canvas, x0 - at.x, y0 - at.y, x1 - x0, y1 - y0);
+    for (int y = 0; clear && y < view.height * scale; y++) {
+        uint32_t *row = view.pixels + (long)y * view.stride;
+
+        for (int x = 0; x < view.width * scale; x++)
+            row[x] = 0xFF000000;
+    }
+    drawing_part = true;
+    draw(&view, x0, y0, arg);
+    drawing_part = false;
+    server_part_drawn(part, x0 - at.x, y0 - at.y, x1 - x0, y1 - y0);
+}
+
+// A piece where it's to be now, shown or not: placed again if it's moved, and all of
+// it drawn again if it's new, or its size changed, as its canvas starts see-through.
+static void lay_piece(struct piece *p, enum server_layer layer, bool shown, struct rect at,
+                      void (*draw)(struct gui_canvas *, int, int, int), int arg) {
+    bool redraw = !p->part || at.width != p->at.width || at.height != p->at.height || (!p->shown && shown);
+
+    if (!p->part && !(p->part = server_part_new(layer)))
+        return;
+    p->draw = draw, p->arg = arg;
+    if (shown && at.width > 0 && at.height > 0) {
+        struct gui_canvas *c = server_part_place(p->part, at.x + p->dx, at.y + p->dy, at.width, at.height);
+
+        p->at = at;
+        if (redraw && c)
+            draw_in(p->part, c, at, at, layer != LAYER_DESKTOP, draw, arg);
+    } else {
+        shown = false;
+    }
+    p->shown = shown;
+    server_part_show(p->part, shown);
+    server_part_look(p->part, p->radius, p->blur, p->opacity);
+}
+
+// How much glass blurs what's under it, from 0 to 1.
+static float glass(void) {
+    return settings.blur && settings.transparency ? 1.0f : 0.0f;
+}
+
+// A flyout opened at start, sliding and fading in, from where it's to be.
+static void lay_flyout(struct piece *p, bool shown, struct rect r, int64_t start,
+                       void (*draw)(struct gui_canvas *, int, int, int), int arg) {
+    int t = ease_out(flyout_progress(start));
+
+    p->dx = 0, p->dy = (256 - t) * FLYOUT_SLIDE / 256 * from_bar();
+    p->opacity = t / 256.0f, p->blur = glass() * p->opacity, p->radius = RADIUS;
+    lay_piece(p, LAYER_OVER, shown, r, draw, arg);
+}
+
+// A flyout closing: its part goes on, fading and sliding away, and the flyout gets a
+// new one, as it'll be drawn afresh when it next opens.
 static void flyout_leaves(struct rect r) {
-    int x0 = r.x - BLUR_MARGIN < 0 ? 0 : r.x - BLUR_MARGIN, y0 = r.y - BLUR_MARGIN < 0 ? 0 : r.y - BLUR_MARGIN;
-    int x1 = r.x + r.width + BLUR_MARGIN, y1 = r.y + r.height + BLUR_MARGIN;
-    struct rect at = {x0, y0, (x1 < screen.width ? x1 : screen.width) - x0, (y1 < screen.height ? y1 : screen.height) - y0};
-    uint32_t *pixels;
+    struct piece *leaving = &pieces[PIECE_LEAVING];
 
-    if (!settings.animations
-        || !(pixels = realloc(flyout_ghost.copy.pixels, (size_t)at.width * at.height * scale * scale * sizeof(uint32_t))))
+    if (!settings.animations)
         return;
-    flyout_ghost.copy = (struct gui_canvas){pixels, at.width, at.height, at.width * scale, scale};
-    flyout_ghost.at = at;
-    flyout_ghost.r = r;
-    flyout_ghost.start = now_ms();
-    no_cursor = true;
-    draw_area(at, flyout_ghost.copy);
-    no_cursor = false;
-    add_damage(at);
-}
+    for (int i = PIECE_MENU; i <= PIECE_LAYOUTS; i++) {
+        struct piece *p = &pieces[i], was = *leaving;
 
-static void draw_flyout_ghost(struct gui_canvas *c, int ox, int oy) {
-    struct rect r = flyout_ghost.r;
-    int t = ease_in(flyout_progress(flyout_ghost.start)), dy = t * FLYOUT_SLIDE / 256 * from_bar();
-
-    if (t == 256 || !flyout_ghost.copy.pixels)
-        return;
-    // In the display's pixels.
-    r = scaled(r), dy *= scale, ox *= scale, oy *= scale;
-    for (int y = r.y + dy; y < r.y + dy + r.height; y++) {
-        const uint32_t *from = flyout_ghost.copy.pixels + (long)(y - dy - flyout_ghost.at.y * scale) * flyout_ghost.copy.stride
-                             - flyout_ghost.at.x * scale;
-
-        if (y < oy || y >= oy + c->height * scale)
+        if (!p->shown || p->at.x != r.x || p->at.y != r.y || p->at.width != r.width || p->at.height != r.height)
             continue;
-        for (int x = r.x < ox ? ox : r.x; x < r.x + r.width && x < ox + c->width * scale; x++) {
-            uint32_t *to = c->pixels + (long)(y - oy) * c->stride + x - ox;
-
-            *to = gui_mix(*to, from[x], 256 - t);
-        }
+        *leaving = *p, p->part = was.part, p->shown = false, p->at = (struct rect){0};
+        if (p->part)
+            server_part_show(p->part, false);
+        flyout_ghost.r = r, flyout_ghost.start = now_ms(), flyout_ghost.going = true;
+        return;
     }
 }
 
-// Damages the flyouts while they move, returning whether any has further to go.
+// Whether a flyout's still sliding, so another frame's wanted.
 static bool animate_flyouts(void) {
     bool going = false;
 
-    // Each goes on a frame past its end, to be drawn as it ends.
-    if (popup_depth && settings.animations && now_ms() - menu_opened < FLYOUT_MS + FRAME_MS) {
-        add_damage(with_shadow(popups[0].r));
+    if (popup_depth && settings.animations && now_ms() - menu_opened < FLYOUT_MS + FRAME_MS)
         going = true;
-    }
-    if (panel >= 0 && settings.animations && now_ms() - panel_opened < FLYOUT_MS + FRAME_MS) {
-        add_damage(with_shadow(panel_rect(panel)));
+    if (panel >= 0 && settings.animations && now_ms() - panel_opened < FLYOUT_MS + FRAME_MS)
         going = true;
-    }
-    if (previewing && settings.animations && now_ms() - preview_opened < FLYOUT_MS + FRAME_MS) {
-        add_damage(with_shadow(preview_rect()));
+    if (previewing && settings.animations && now_ms() - preview_opened < FLYOUT_MS + FRAME_MS)
         going = true;
-    }
-    if (layout_shown && settings.animations && now_ms() - layout_opened < FLYOUT_MS + FRAME_MS) {
-        add_damage(with_shadow(layout_rect()));
+    if (layout_shown && settings.animations && now_ms() - layout_opened < FLYOUT_MS + FRAME_MS)
         going = true;
-    }
-    if (flyout_ghost.copy.pixels) {
-        add_damage(with_shadow(flyout_ghost.r));
-        if (flyout_progress(flyout_ghost.start) < 256)
-            going = true;
-        else {
-            free(flyout_ghost.copy.pixels);
-            flyout_ghost.copy.pixels = NULL;
-        }
+    if (flyout_ghost.going) {
+        flyout_ghost.going = flyout_progress(flyout_ghost.start) < 256;
+        going = true;
     }
     return going;
 }
 
-// Draws everything that overlaps a rectangle, on a canvas that is only that part
-// of the screen.
-static void draw_area(struct rect r, struct gui_canvas c) {
-    int hint_y = desktop().y + desktop().height - 2 * GUI_CHAR_HEIGHT, first = -1;
-    struct rect bar = taskbar();
+// Each window placed, its title bar drawn if it's new or its size changed, and while
+// it moves between places, its copy drawn instead.
+static void lay_windows(void) {
+    struct surface *order[MAX_WINDOWS];
+    float shadow = settings.shadows ? 0.5f : 0.0f;
 
-    if (choosing.pixels) {
-        draw_choosing(&c, r.x, r.y);
-        if (!no_cursor)
-            draw_cursor(&c, r.x, r.y);
-        return;
-    }
-    // Nothing under a window that covers all of it can be seen.
-    for (int i = window_count - 1; i >= 0 && first < 0 && !overview; i--) {
-        if (covers(windows[i], r))
-            first = i;
-    }
-    if (first < 0) {
-        if (wallpaper.pixels)
-            gui_copy(&c, 0, 0, &wallpaper, r.x, r.y, r.width, r.height);
-        else
-            gui_fill(&c, 0, 0, r.width, r.height, DESKTOP_COLOR);
-        if (!locked) {
-            gui_text(&c, GUI_CHAR_WIDTH - r.x, hint_y - r.y, HINT, HINT_COLOR, 1);
-            draw_desktop(&c, r.x, r.y);
-        }
-        first = 0;
-    }
-    for (int i = first; i < window_count && !overview; i++) {
+    for (int i = 0; i < window_count; i++) {
         struct window *w = windows[i];
-        int alpha;
+        struct rect f = frame_of(w);
+        bool moving = w->anim_ms != 0;
+        struct window_look look = {
+            .shown = visible(w) && !overview, .x = w->x, .y = w->y,
+            .frame_x = f.x, .frame_y = f.y, .frame_width = f.width, .frame_height = f.height,
+            .radius = rounded(w) ? RADIUS : 0, .shadow = w->bare ? 0 : shadow * w->shadow / 256.0f,
+            .shadow_size = SHADOW, .shadow_drop = SHADOW_DROP,
+            .title_height = w->bare ? 0 : TITLE_HEIGHT + BORDER, .blur_title = glass() > 0,
+            .blur_contents = see_through(w) && glass() > 0, .border = w->bare ? 0 : BORDER,
+            .border_color = BORDER_COLOR, .moving = moving};
 
-        if (!visible(w) || !overlaps(drawn_extent(w), r))
-            continue;
-        if (w->anim_ms) {
-            struct rect now = arriving(w, &alpha);
+        order[i] = w->surface;
+        if (!w->bare) {
+            struct scene_part *frame = server_window_frame(w->surface);
+            struct rect title = {f.x, f.y, f.width, TITLE_HEIGHT + BORDER};
+            struct gui_canvas *c = frame ? server_part_place(frame, title.x, title.y, title.width, title.height) : NULL;
 
-            draw_layer(&c, &w->layer, now, alpha, w->shadow, rounded(w), see_through(w), r.x, r.y);
-            continue;
+            if (c && (c->width != w->frame_width || c->scale != w->frame_scale || w->frame_stale)) {
+                draw_in(frame, c, title, title, true, draw_frame_piece, i);
+                w->frame_width = c->width, w->frame_scale = c->scale, w->frame_stale = false;
+            }
+            if (frame)
+                server_part_show(frame, true);
         }
-        if (settings.shadows)
-            draw_shadow(&c, w, r.x, r.y);
-        draw_window(&c, w, r.x, r.y);
-    }
-    if (overview)
-        draw_overview(&c, r.x, r.y);
-    else
-        draw_ghosts(&c, r.x, r.y);
-    if (locked) {
-        if (!no_cursor)
-            draw_cursor(&c, r.x, r.y);
-        return;
-    }
-    if (snap && overlaps(snap_rect(snap), r))
-        draw_snap(&c, r.x, r.y);
-    if (bar_visible() && overlaps(r, bar))
-        draw_taskbar(&c, r.x, r.y);
-    draw_notices(&c, r.x, r.y);
-    if (osd_until && overlaps(osd_rect(), r))
-        draw_osd(&c, r.x, r.y);
-    if (popup_depth)
-        draw_flyout(&c, popups[0].r, menu_opened, draw_popup, 0, r.x, r.y);
-    if (popup_depth > 1)
-        draw_popup(&c, 1, r.x, r.y);
-    if (panel >= 0)
-        draw_flyout(&c, panel_rect(panel), panel_opened, draw_open_panel, 0, r.x, r.y);
-    if (previewing)
-        draw_flyout(&c, preview_rect(), preview_opened, draw_preview, 0, r.x, r.y);
-    if (layout_shown)
-        draw_flyout(&c, layout_rect(), layout_opened, draw_layouts, 0, r.x, r.y);
-    draw_flyout_ghost(&c, r.x, r.y);
-    if (switch_choice >= 0)
-        draw_switcher(&c, r.x, r.y);
-    if (drag_file[0] && drag_icon && !no_cursor) {
-        struct rect d = drag_rect();
+        if (moving) {
+            struct scene_part *copy = server_window_moving(w->surface);
+            struct rect e = drawn_extent(w);
+            struct gui_canvas *c = copy ? server_part_place(copy, e.x, e.y, e.width, e.height) : NULL;
 
-        gui_draw_image(&c, d.x - r.x, d.y - r.y, drag_icon);
+            if (c)
+                draw_in(copy, c, e, e, true, draw_moving_piece, i);
+            if (copy)
+                server_part_show(copy, true);
+        }
+        server_window_look(w->surface, &look);
     }
-    if (auth_shown)
-        draw_auth(&c, r.x, r.y);
-    if (!no_cursor)
-        draw_cursor(&c, r.x, r.y);
+    server_windows_order(order, window_count);
 }
 
-// Composes all that changed before showing any of it, so a window being moved is
-// never seen gone from both places.
-// The night light takes away some of the blue, and less of the green, as the
-// screen's shown, which is how these keep each.
-static uint8_t night_green[256], night_blue[256];
+// Everything over the windows: shown, placed and faded as it is now.
+static void lay_over(void) {
+    struct rect all = {0, 0, screen.width, screen.height}, bar = taskbar();
+    bool up = !locked;
 
-static void make_night(void) {
-    int k = settings.night_strength;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        struct piece *p = &pieces[PIECE_GHOSTS + i];
 
-    for (int i = 0; i < 256; i++) {
-        night_green[i] = i * (256 - k * 72 / 100) >> 8;
-        night_blue[i] = i * (256 - k * 184 / 100) >> 8;
+        p->opacity = 1, p->blur = 0, p->radius = 0;
+        if (i < ghost_count) {
+            const struct ghost *g = &ghosts[i];
+
+            lay_piece(p, LAYER_OVER, true, bounds(with_shadow(g->from), with_shadow(g->to)), draw_ghost_piece, i);
+            add_damage(p->at); // as it fades each frame
+        } else if (p->part) {
+            lay_piece(p, LAYER_OVER, false, all, draw_ghost_piece, i);
+        }
     }
+    pieces[PIECE_OVERVIEW].opacity = 1;
+    lay_piece(&pieces[PIECE_OVERVIEW], LAYER_OVER, overview, all, draw_overview_piece, 0);
+    pieces[PIECE_SNAP].opacity = 1;
+    lay_piece(&pieces[PIECE_SNAP], LAYER_OVER, up && snap, snap ? snap_rect(snap) : all, draw_snap_piece, 0);
+    pieces[PIECE_TASKBAR].opacity = 1, pieces[PIECE_TASKBAR].blur = glass(), pieces[PIECE_TASKBAR].radius = RADIUS;
+    lay_piece(&pieces[PIECE_TASKBAR], LAYER_OVER, up && bar_visible(), bar, draw_taskbar_piece, 0);
+    for (int i = 0; i < MAX_NOTICES; i++) {
+        struct piece *p = &pieces[PIECE_NOTICES + i];
+
+        p->opacity = 1, p->blur = glass(), p->radius = RADIUS;
+        lay_piece(p, LAYER_OVER, up && i < notice_count, i < notice_count ? notice_rect(i) : all, draw_notices_piece, i);
+    }
+    pieces[PIECE_OSD].opacity = 1, pieces[PIECE_OSD].blur = glass(), pieces[PIECE_OSD].radius = RADIUS;
+    lay_piece(&pieces[PIECE_OSD], LAYER_OVER, up && osd_until, osd_until ? osd_rect() : all, draw_osd_piece, 0);
+    lay_flyout(&pieces[PIECE_MENU], up && popup_depth > 0, popups[0].r, menu_opened, draw_menu_piece, 0);
+    lay_flyout(&pieces[PIECE_SUBMENU], up && popup_depth > 1, popups[1].r, menu_opened - FLYOUT_MS, draw_menu_piece, 1);
+    lay_flyout(&pieces[PIECE_PANEL], up && panel >= 0, panel >= 0 ? panel_rect(panel) : all, panel_opened,
+               draw_panel_piece, 0);
+    lay_flyout(&pieces[PIECE_PREVIEW], up && previewing, previewing ? preview_rect() : all, preview_opened,
+               draw_preview_piece, 0);
+    lay_flyout(&pieces[PIECE_LAYOUTS], up && layout_shown, layout_shown ? layout_rect() : all, layout_opened,
+               draw_layouts_piece, 0);
+
+    // The flyout that closed, sliding and fading away; its part's drawn already.
+    struct piece *leaving = &pieces[PIECE_LEAVING];
+    int t = ease_in(flyout_progress(flyout_ghost.start));
+
+    if (leaving->part) {
+        leaving->dy = t * FLYOUT_SLIDE / 256 * from_bar(), leaving->opacity = 1 - t / 256.0f;
+        leaving->blur = glass() * leaving->opacity;
+        leaving->shown = leaving->shown && flyout_ghost.going;
+        if (leaving->shown)
+            server_part_place(leaving->part, leaving->at.x, leaving->at.y + leaving->dy, leaving->at.width,
+                              leaving->at.height);
+        server_part_show(leaving->part, leaving->shown);
+        server_part_look(leaving->part, leaving->radius, leaving->blur, leaving->opacity);
+    }
+    pieces[PIECE_SWITCHER].opacity = 1, pieces[PIECE_SWITCHER].blur = glass(), pieces[PIECE_SWITCHER].radius = RADIUS;
+    lay_piece(&pieces[PIECE_SWITCHER], LAYER_OVER, up && switch_choice >= 0, switch_choice >= 0 ? switcher() : all,
+              draw_switcher_piece, 0);
+    pieces[PIECE_DRAGGED].opacity = 1;
+    lay_piece(&pieces[PIECE_DRAGGED], LAYER_OVER, drag_file[0] && drag_icon && !no_cursor, drag_rect(),
+              draw_dragged_piece, 0);
+    pieces[PIECE_AUTH].opacity = 1, pieces[PIECE_AUTH].blur = glass(), pieces[PIECE_AUTH].radius = RADIUS;
+    lay_piece(&pieces[PIECE_AUTH], LAYER_OVER, auth_shown, auth_rect(), draw_auth_piece, 0);
+    pieces[PIECE_CHOOSING].opacity = 1;
+    lay_piece(&pieces[PIECE_CHOOSING], LAYER_OVER, choosing.pixels != NULL, all, draw_choosing_piece, 0);
+    pieces[PIECE_FADE].opacity = (256 - screen_shown()) / 256.0f;
+    lay_piece(&pieces[PIECE_FADE], LAYER_OVER, screen_shown() < 256, all, draw_fade_piece, 0);
+
+    cursor_piece.opacity = 1;
+    if (cursor_changed && cursor_piece.part)
+        cursor_piece.at = (struct rect){0}; // so it's drawn again, in its new shape
+    cursor_changed = false;
+    lay_piece(&cursor_piece, LAYER_CURSOR, !no_cursor, cursor_rect(), draw_cursor_piece, 0);
 }
 
-// A row of the screen on the display's, with the night light's colours.
-static void show_row(uint8_t *to, const uint32_t *from, int width) {
-    uint32_t *out = (uint32_t *)to;
-
-    if (!settings.night_light) {
-        memcpy(to, from, width * sizeof(uint32_t));
-        return;
-    }
-    for (int x = 0; x < width; x++)
-        out[x] = (from[x] & 0xFF0000) | night_green[from[x] >> 8 & 0xFF] << 8 | night_blue[from[x] & 0xFF];
-}
-
-// Draws a rectangle of the screen. As what's see-through blurs what's under it,
-// a little more is drawn around it, on the side, so the blur reads what's really there.
+// What changed, drawn in the parts it overlaps. The fading copies are drawn already.
 static void compose(struct rect r) {
-    static uint32_t *pixels;
-    static size_t size;
-    int x0 = r.x - BLUR_MARGIN < 0 ? 0 : r.x - BLUR_MARGIN, y0 = r.y - BLUR_MARGIN < 0 ? 0 : r.y - BLUR_MARGIN;
-    int x1 = r.x + r.width + BLUR_MARGIN, y1 = r.y + r.height + BLUR_MARGIN;
-    struct rect e = {x0, y0, (x1 < screen.width ? x1 : screen.width) - x0, (y1 < screen.height ? y1 : screen.height) - y0};
-    size_t needed = (size_t)e.width * e.height * scale * scale;
-    struct gui_canvas area = {pixels, e.width, e.height, e.width * scale, scale};
+    for (int i = 0; i < PIECES; i++) {
+        struct piece *p = &pieces[i];
 
-    if (needed > size) {
-        uint32_t *bigger = realloc(pixels, needed * sizeof(*pixels));
-
-        if (!bigger)
-            return;
-        area.pixels = pixels = bigger, size = needed;
+        if (p->shown && i != PIECE_LEAVING && i != PIECE_FADE && overlaps(p->at, r))
+            draw_in(p->part, server_part_place(p->part, p->at.x + p->dx, p->at.y + p->dy, p->at.width, p->at.height),
+                    p->at, r, true, p->draw, p->arg);
     }
-    draw_area(e, area);
-    gui_copy(&screen, r.x, r.y, &area, r.x - e.x, r.y - e.y, r.width, r.height);
+    for (int i = 0; i < window_count; i++) {
+        struct window *w = windows[i];
+        struct rect f = frame_of(w), title = {f.x, f.y, f.width, TITLE_HEIGHT + BORDER};
+        struct scene_part *frame = w->bare ? NULL : server_window_frame(w->surface);
+
+        if (frame && visible(w) && overlaps(title, r))
+            draw_in(frame, server_part_place(frame, title.x, title.y, title.width, title.height), title, r, true,
+                    draw_frame_piece, i);
+    }
 }
 
+// The scene, as wm's laid it out now: the desktop where it changed itself, then the
+// windows, what's over them, and what else changed, drawn in the parts it overlaps.
 static void redraw(void) {
-    static uint32_t mixed[MAX_SIZE * GUI_MAX_SCALE];
-    int shown = screen_shown();
+    struct rect all = {0, 0, screen.width, screen.height};
 
+    desktop_piece.opacity = 1;
+    lay_piece(&desktop_piece, LAYER_DESKTOP, true, all, draw_desktop_piece, 0);
+    for (int i = 0; i < desktop_damage_count && desktop_piece.part; i++)
+        draw_in(desktop_piece.part, server_part_place(desktop_piece.part, 0, 0, screen.width, screen.height), all,
+                desktop_damage[i], false, draw_desktop_piece, 0);
+    desktop_damage_count = 0;
+    lay_windows();
+    lay_over();
     for (int i = 0; i < damage_count; i++)
         compose(damage[i]);
-    for (int i = 0; i < damage_count; i++) {
-        struct rect r = scaled(damage[i]); // in the display's pixels, from here
-
-        for (int row = r.y; row < r.y + r.height; row++) {
-            uint32_t *now = screen.pixels + (long)row * screen.stride + r.x;
-
-            // Part way through fading, the row's what was there mixed with what's there now.
-            if (shown < 256) {
-                const uint32_t *was = screen_fade.was + (long)row * screen.width * scale + r.x;
-
-                for (int x = 0; x < r.width; x++)
-                    mixed[x] = gui_mix(was[x], now[x], shown);
-                now = mixed;
-            }
-            show_row(output.pixels + (long)row * output.pitch + r.x * sizeof(uint32_t), now, r.width);
-        }
-        display->changed(r.x, r.y, r.width, r.height);
-    }
-    if (damage_count)
-        display->show();
     damage_count = 0;
+    display->show();
 }
 
 static void send_to(struct window *w, struct gui_message m) {
@@ -4973,6 +5108,7 @@ struct window *wm_window_new(struct surface *s, int width, int height, bool popu
     w->y = 60 + TITLE_HEIGHT + step * CASCADE;
     w->want_width = w->asked_width = width;
     w->want_height = w->asked_height = height;
+    w->contents_stale = true; // what the app drew is the GPU's
     w->login = surface_is_login(s);
     w->popup = popup;
     w->bare = w->login || popup;
@@ -5069,7 +5205,19 @@ void wm_window_pixels(struct window *w, const uint32_t *pixels, int width, int h
         x = y = 0, changed_width = width, changed_height = height;
     }
     gui_copy(&w->canvas, x, y, &from, x, y, changed_width, changed_height);
-    add_damage((struct rect){w->x + x, w->y + y, changed_width, changed_height});
+    copy_changed(w);
+}
+
+// The app drew at a new size: framed at it, with its copy's pixels read back when
+// they're next wanted.
+void wm_window_size(struct window *w, int width, int height) {
+    if (take_size(w, width, height))
+        w->contents_stale = true;
+    copy_changed(w);
+}
+
+void wm_window_changed(struct window *w) {
+    w->contents_stale = true;
     copy_changed(w);
 }
 
@@ -5374,7 +5522,10 @@ static void screenshot(bool window) {
     compose(r);
     no_cursor = false;
     add_damage(r); // to put the cursor back
-    struct gui_canvas shot = gui_part(&screen, r.x, r.y, r.width, r.height);
+    struct gui_canvas shot;
+
+    server_read_screen(&screen);
+    shot = gui_part(&screen, r.x, r.y, r.width, r.height);
 
     save_shot(&shot);
 }
@@ -5390,7 +5541,8 @@ static void start_choosing(void) {
     hide_preview();
     set_overview(false);
     no_cursor = true;
-    compose(all);
+    redraw(); // without the menus and the cursor
+    server_read_screen(&screen);
     no_cursor = false;
     for (int y = 0; y < screen.height * scale; y++)
         memcpy(pixels + (long)y * screen.width * scale, screen.pixels + (long)y * screen.stride,
@@ -6555,9 +6707,8 @@ static void update_cursor(void) {
 
     if (shape == cursor_shown)
         return;
-    damage_cursor();
     cursor_shown = shape;
-    damage_cursor();
+    cursor_changed = true;
 }
 
 // Super with something else is for wm, and every other key goes to the focused window.
@@ -6845,7 +6996,7 @@ static void load_settings(void) {
     theme_now.title_focused = gui_accent_colors[settings.accent];
     theme_now.on_accent = gui_on_accent(settings.accent);
     theme = &theme_now;
-    make_night();
+    server_night(settings.night_light ? settings.night_strength : 0);
     autohide();
     if (desktop().y != was.y || desktop().height != was.height) {
         fit_windows(was);
@@ -6887,6 +7038,7 @@ static void dump_screen(void) {
 
     dump_asked = 0;
     snprintf(path, sizeof(path), "%s/wm-screen.png", runtime ? runtime : "/tmp");
+    server_read_screen(&screen);
     printf(gui_image_save(path, &screen) ? "wm: saved the screen to %s\n" : "wm: can't save the screen to %s\n", path);
 }
 

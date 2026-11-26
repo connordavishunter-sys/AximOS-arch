@@ -69,11 +69,24 @@ uint32_t gui_on_accent(int accent) {
     return accent == 6 ? 0x1E2129 : 0xFFFFFF;
 }
 
+// b over a, amount of it out of 256. Colours' top byte is how see-through they are,
+// with the colour as it is, not multiplied by how solid, so over one that's
+// see-through, b's colour stays as it is and only how solid it is is blended.
 uint32_t gui_mix(uint32_t a, uint32_t b, int amount) {
     uint32_t keep = 256 - amount;
 
-    return ((((a & 0xFF00FF) * keep + (b & 0xFF00FF) * amount) >> 8) & 0xFF00FF)
-         | ((((a & 0x00FF00) * keep + (b & 0x00FF00) * amount) >> 8) & 0x00FF00);
+    if (!((a | b) >> 24)) // both solid, as nearly everything is
+        return ((((a & 0xFF00FF) * keep + (b & 0xFF00FF) * amount) >> 8) & 0xFF00FF)
+             | ((((a & 0x00FF00) * keep + (b & 0x00FF00) * amount) >> 8) & 0x00FF00);
+
+    uint32_t under = 255 - (a >> 24), over = (255 - (b >> 24)) * (uint32_t)amount / 256;
+    uint32_t below = under * (255 - over) / 255, solid = over + below;
+
+    if (!solid)
+        return 0xFF000000;
+    return (255 - solid) << 24 | ((b >> 16 & 0xFF) * over + (a >> 16 & 0xFF) * below) / solid << 16
+         | ((b >> 8 & 0xFF) * over + (a >> 8 & 0xFF) * below) / solid << 8
+         | ((b & 0xFF) * over + (a & 0xFF) * below) / solid;
 }
 
 void gui_settings_load(struct gui_settings *s) {

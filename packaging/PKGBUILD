@@ -10,7 +10,7 @@ pkgdesc='AximOS desktop'
 arch=(x86_64)
 url='https://github.com/connordavishunter-sys/AximOS-arch'
 license=(custom)
-makedepends=(wlroots0.20 wayland wayland-protocols libinput libxkbcommon pixman libdrm libpulse pam stb
+makedepends=(wlroots0.20 scenefx wayland wayland-protocols libinput libxkbcommon pixman libdrm libpulse pam stb
              mpg123 lame flac libvorbis libogg opus faad2 faac libxcrypt)
 source=(aximos.tar.gz keyring.tar.gz)
 sha256sums=(SKIP SKIP)
@@ -50,7 +50,7 @@ package_aximos-apps() {
 
 package_aximos-desktop() {
     pkgdesc='AximOS desktop: wm, a Wayland compositor on wlroots, with XWayland, and its log-in screen'
-    depends=(aximos-libgui aximos-apps aximos-keyring wlroots0.20 libinput pixman libdrm pam systemd-libs xorg-xwayland
+    depends=(aximos-libgui aximos-apps aximos-keyring wlroots0.20 scenefx libinput pixman libdrm pam systemd-libs xorg-xwayland
              pipewire-pulse bluez polkit pacman-contrib fakeroot)
     optdepends=('greetd: to log in with wm'"'"'s own log-in screen' 'networkmanager: for the network panel')
     backup=(etc/pam.d/aximos-lock)

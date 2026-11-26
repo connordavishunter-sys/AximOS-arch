@@ -43,11 +43,14 @@ Still to come: screens beyond the first.
 
 - **wm** (`user/wm`) is `wm.c`, the window manager as it was, and `server.c`, its
   wlroots server. wlroots has the screen, through DRM, the input, through libinput,
-  and the session, through libseat. wm draws the whole desktop in memory, as it always
-  has, which is put on the screen as a texture each frame. Apps get only shared memory
-  buffers, which are copied into wm's windows as they commit, so wm can blur, round and
-  animate them like its own. At 2x, wm and every window are drawn at the screen's own
-  resolution, and only laid out in the desktop's pixels, each two of the screen's across.
+  and the session, through libseat. The GPU composites the screen, through SceneFX,
+  wlroots' scene graph with blur, shadows and rounded corners (`docs/scene.md`): apps'
+  windows straight from their buffers, and what wm draws itself, the desktop, title bars,
+  the taskbar, panels, menus and the cursor, each in a part of its own, uploaded only
+  when it changes. Glass blurs what's behind it on the GPU, flyouts fade and slide there,
+  and the night light is a colour transform there. At 2x, everything's drawn at the
+  screen's own resolution, and only laid out in the desktop's pixels, each two of the
+  screen's across.
 - **Icons** are 16x16, with a 32x32 one for 2x beside each, `name@2x.png`, which
   `tools/icons.py` draws.
 - **libgui** (`user/libgui`) is a Wayland client: each window is an xdg-shell toplevel,

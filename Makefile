@@ -18,7 +18,7 @@ LDFLAGS += -L$(BUILD)/lib -Wl,-rpath-link,$(BUILD)/lib
 
 # What libgui, wm and the codecs need from Arch.
 GUI_PACKAGES := wayland-client xkbcommon
-WM_PACKAGES := $(WLR) wayland-server xkbcommon libinput pixman-1 libdrm libsystemd
+WM_PACKAGES := $(WLR) scenefx-0.5 wayland-server xkbcommon libinput pixman-1 libdrm libsystemd
 AUDIO_PACKAGES := libpulse libpulse-simple
 CODECS := wav mp3 flac vorbis opus aac
 CODEC_LIBS_mp3 := -lmpg123 -lmp3lame
