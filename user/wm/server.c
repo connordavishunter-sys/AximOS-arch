@@ -89,7 +89,7 @@ struct surface {
     struct wlr_scene_tree *tree, *contents;
     struct wlr_scene_shadow *shadow;
     struct wlr_scene_blur *blur;
-    struct wlr_scene_rect *border[3]; // left, right and bottom
+    struct wlr_scene_rect *border; // down its sides and along its bottom, a ring around its contents
     struct scene_part *frame, *moving;
     int contents_x, contents_y; // where wm last put its contents
     int seen_width, seen_height; // its size, as wm last heard it
@@ -594,8 +594,7 @@ static void scene_window_new(struct surface *s) {
         return;
     s->shadow = wlr_scene_shadow_create(s->tree, 0, 0, 0, 0, (float[4]){0, 0, 0, 0});
     s->blur = wlr_scene_blur_create(s->tree, 0, 0);
-    for (int i = 0; i < 3; i++)
-        s->border[i] = wlr_scene_rect_create(s->tree, 0, 0, (float[4]){0, 0, 0, 1});
+    s->border = wlr_scene_rect_create(s->tree, 0, 0, (float[4]){0, 0, 0, 1});
     s->contents = wlr_scene_subsurface_tree_create(s->tree, s->surface);
     wlr_scene_node_set_enabled(&s->shadow->node, false);
     wlr_scene_node_set_enabled(&s->blur->node, false);
@@ -608,7 +607,7 @@ static void scene_window_gone(struct surface *s) {
     if (s->tree)
         wlr_scene_node_destroy(&s->tree->node);
     s->tree = s->contents = NULL, s->shadow = NULL, s->blur = NULL, s->frame = s->moving = NULL;
-    memset(s->border, 0, sizeof(s->border));
+    s->border = NULL;
 }
 
 struct scene_part *server_window_frame(struct surface *s) {
@@ -681,22 +680,29 @@ void server_window_look(struct surface *s, const struct window_look *look) {
         wlr_scene_node_set_position(&s->shadow->node, look->frame_x - spread, look->frame_y - spread + look->shadow_drop);
         wlr_scene_shadow_set_size(s->shadow, look->frame_width + 2 * spread, look->frame_height + 2 * spread);
         wlr_scene_shadow_set_corner_radius(s->shadow, look->radius);
-        wlr_scene_shadow_set_blur_sigma(s->shadow, spread / 2.0f);
+        wlr_scene_shadow_set_blur_sigma(s->shadow, spread); // the frame, blurred out to the node's edge
         wlr_scene_shadow_set_color(s->shadow, black);
+        // Only around it, not under it, where it'd show through what's see-through.
+        wlr_scene_shadow_set_clipped_region(s->shadow, (struct clipped_region){
+                                                           {spread, spread - look->shadow_drop, look->frame_width,
+                                                            look->frame_height},
+                                                           corner_radii_all(look->radius)});
     }
-    // The border down its sides and along its bottom; the title bar's frame has the top.
+    // The border down its sides and along its bottom, its corners rounded as the frame's,
+    // with its contents' rounded rectangle cut out of it. The title bar's part has the top.
     float color[4] = {(look->border_color >> 16 & 0xFF) / 255.0f, (look->border_color >> 8 & 0xFF) / 255.0f,
                       (look->border_color & 0xFF) / 255.0f, 1};
-    int top = look->frame_y + look->title_height, bottom = look->frame_y + look->frame_height, b = look->border;
-    struct wlr_box sides[3] = {{look->frame_x, top, b, bottom - top},
-                               {look->frame_x + look->frame_width - b, top, b, bottom - top},
-                               {look->frame_x, bottom - b, look->frame_width, b}};
+    int top = look->frame_y + look->title_height, height = look->frame_height - look->title_height, b = look->border;
 
-    for (int i = 0; i < 3; i++) {
-        wlr_scene_node_set_enabled(&s->border[i]->node, b > 0 && !look->moving);
-        wlr_scene_node_set_position(&s->border[i]->node, sides[i].x, sides[i].y);
-        wlr_scene_rect_set_size(s->border[i], sides[i].width, sides[i].height);
-        wlr_scene_rect_set_color(s->border[i], color);
+    wlr_scene_node_set_enabled(&s->border->node, b > 0 && height > b && !look->moving);
+    if (b > 0 && height > b) {
+        wlr_scene_node_set_position(&s->border->node, look->frame_x, top);
+        wlr_scene_rect_set_size(s->border, look->frame_width, height);
+        wlr_scene_rect_set_color(s->border, color);
+        wlr_scene_rect_set_corner_radii(s->border, corner_radii_bottom(look->radius));
+        wlr_scene_rect_set_clipped_region(s->border, (struct clipped_region){
+                                                         {b, 0, look->frame_width - 2 * b, height - b},
+                                                         corner_radii_bottom(look->radius > b ? look->radius - b : 0)});
     }
     bool blur = ((look->blur_title && look->title_height > 0) || look->blur_contents) && !look->moving;
 

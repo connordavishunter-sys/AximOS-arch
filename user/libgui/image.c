@@ -169,16 +169,14 @@ void gui_draw_image(struct gui_canvas *canvas, int x, int y, const struct gui_im
         const uint32_t *from = image->pixels + (long)(row * own / k) * image->width;
         uint32_t *to = canvas->pixels + (long)(y + row) * canvas->stride + x;
 
-        // Red and blue together, then green, with alpha out of 256 so that the
-        // shift keeps the channels apart.
+        // With alpha out of 256, over what's there, which may be see-through itself.
         for (int col = x0; col < x1; col++) {
-            uint32_t p = from[col * own / k], a = (p >> 24) + (p >> 31), q = to[col];
+            uint32_t p = from[col * own / k], a = (p >> 24) + (p >> 31);
 
             if (a == 256)
                 to[col] = p & 0xFFFFFF;
             else if (a)
-                to[col] = (((p & 0xFF00FF) * a + (q & 0xFF00FF) * (256 - a)) >> 8 & 0xFF00FF)
-                        | (((p & 0x00FF00) * a + (q & 0x00FF00) * (256 - a)) >> 8 & 0x00FF00);
+                to[col] = gui_mix(to[col], p & 0xFFFFFF, a);
         }
     }
 }

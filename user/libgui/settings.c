@@ -69,9 +69,10 @@ uint32_t gui_on_accent(int accent) {
     return accent == 6 ? 0x1E2129 : 0xFFFFFF;
 }
 
-// b over a, amount of it out of 256. Colours' top byte is how see-through they are,
-// with the colour as it is, not multiplied by how solid, so over one that's
-// see-through, b's colour stays as it is and only how solid it is is blended.
+// a and b mixed, amount of b out of 256, as a pixel partly covered by b is. Colours'
+// top byte is how see-through they are, with the colour as it is, not multiplied by
+// how solid, so each colour counts as much as it's solid: a solid colour mixed into
+// one that's see-through keeps its colour, and only how solid it is is mixed.
 uint32_t gui_mix(uint32_t a, uint32_t b, int amount) {
     uint32_t keep = 256 - amount;
 
@@ -79,14 +80,12 @@ uint32_t gui_mix(uint32_t a, uint32_t b, int amount) {
         return ((((a & 0xFF00FF) * keep + (b & 0xFF00FF) * amount) >> 8) & 0xFF00FF)
              | ((((a & 0x00FF00) * keep + (b & 0x00FF00) * amount) >> 8) & 0x00FF00);
 
-    uint32_t under = 255 - (a >> 24), over = (255 - (b >> 24)) * (uint32_t)amount / 256;
-    uint32_t below = under * (255 - over) / 255, solid = over + below;
+    uint32_t wa = (255 - (a >> 24)) * keep, wb = (255 - (b >> 24)) * (uint32_t)amount, solid = wa + wb;
 
     if (!solid)
         return 0xFF000000;
-    return (255 - solid) << 24 | ((b >> 16 & 0xFF) * over + (a >> 16 & 0xFF) * below) / solid << 16
-         | ((b >> 8 & 0xFF) * over + (a >> 8 & 0xFF) * below) / solid << 8
-         | ((b & 0xFF) * over + (a & 0xFF) * below) / solid;
+    return (255 - solid / 256) << 24 | ((a >> 16 & 0xFF) * wa + (b >> 16 & 0xFF) * wb) / solid << 16
+         | ((a >> 8 & 0xFF) * wa + (b >> 8 & 0xFF) * wb) / solid << 8 | ((a & 0xFF) * wa + (b & 0xFF) * wb) / solid;
 }
 
 void gui_settings_load(struct gui_settings *s) {
