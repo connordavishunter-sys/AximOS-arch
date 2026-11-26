@@ -146,6 +146,11 @@ def draw(name):
         note(i, RED, 14, 10)
     elif name == 'bell':
         bell(i)
+    elif name == 'bluetooth':
+        i.line([(10, 10), (22, 21), (16, 27), (16, 5), (22, 11), (10, 22)], BLUE_LIGHT, 2.5)
+    elif name == 'bluetooth-off':
+        i.line([(10, 10), (22, 21), (16, 27), (16, 5), (22, 11), (10, 22)], DIM, 2.5)
+        cross(i, 25, 8, 4)
     elif name == 'brightness':
         i.circle(16, 16, 6.5, fill=YELLOW)
         for n in range(8):
@@ -273,6 +278,10 @@ def draw(name):
         raise SystemExit(f'no drawing for {name}')
     return i
 
+
+for name in ('bluetooth', 'bluetooth-off'):  # new ones, at 1x too
+    if not os.path.exists(os.path.join(ICONS, name + '.png')):
+        draw(name).image.resize((16, 16), Image.LANCZOS).save(os.path.join(ICONS, name + '.png'))
 
 for folder_path in (ICONS, os.path.join(ICONS, 'apps')):
     for file in sorted(os.listdir(folder_path)):

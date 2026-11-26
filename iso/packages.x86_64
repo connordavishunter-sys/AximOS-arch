@@ -7,8 +7,10 @@ amd-ucode
 mkinitcpio
 mkinitcpio-archiso
 sudo
-# Services: systemd's, NetworkManager, PipeWire with WirePlumber, and UPower
+# Services: systemd's, NetworkManager, PipeWire with WirePlumber, BlueZ, and UPower
 networkmanager
+bluez
+bluez-utils
 pipewire
 pipewire-pulse
 pipewire-alsa

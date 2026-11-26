@@ -152,7 +152,7 @@ SIGNING_KEY ?= D0EB0C9AA46C7C675C8306B1F344BF999C1E9042
 packages:
 	rm -rf $(PACKAGING) && mkdir -p $(PACKAGING) $(REPO) $(CHROOT) $(PACKAGE_CACHE)
 	sed 's/^pkgver=.*/pkgver=$(VERSION)/' packaging/PKGBUILD > $(PACKAGING)/PKGBUILD
-	cp packaging/keyring/aximos-keyring.install $(PACKAGING)/
+	cp packaging/keyring/aximos-keyring.install packaging/aximos-desktop.install $(PACKAGING)/
 	tar -czf $(PACKAGING)/keyring.tar.gz -C packaging keyring
 	tar -czf $(PACKAGING)/aximos.tar.gz --transform 's,^\.,aximos,' --exclude=./build --exclude=./.git .
 	[ -d $(CHROOT)/root ] || sudo mkarchroot -C /usr/share/devtools/pacman.conf.d/extra.conf \

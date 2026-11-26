@@ -1,4 +1,5 @@
 #include <aximos.h>
+#include "bluetooth.h"
 #include "network.h"
 #include "polkit.h"
 #include "server.h"
@@ -1225,10 +1226,10 @@ static void draw_notices(struct gui_canvas *c, int ox, int oy) {
     }
 }
 
-// The tray, left of the clock: the clipboard's history, the network, quick settings,
-// shown by the battery's and the speaker's icons, and notifications, each opening a
-// panel by it. The clock opens a calendar.
-enum { TRAY_QUICK, TRAY_NOTICES, TRAY_CLIPS, TRAY_NETWORK, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
+// The tray, left of the clock: the clipboard's history, Bluetooth, with an adapter,
+// the network, quick settings, shown by the battery's and the speaker's icons, and
+// notifications, each opening a panel by it. The clock opens a calendar.
+enum { TRAY_QUICK, TRAY_NOTICES, TRAY_CLIPS, TRAY_NETWORK, TRAY_BLUETOOTH, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
 enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILE_QUIET, TILES };
 #define DAY_WIDTH 32
 #define DAY_HEIGHT 24
@@ -1249,6 +1250,7 @@ static char now_playing[GUI_TITLE_MAX];
 static int mixer = -1, volume = 100; // mixer's 0 with a sound card
 static bool muted, setting_volume;
 static const struct network *net; // as NetworkManager has it
+static const struct bluetooth *bt; // as BlueZ has it
 static int calendar_month; // shown, from this one
 
 // The laptop's battery and backlight, from /sys/class, and the popup their keys
@@ -1279,6 +1281,7 @@ static struct rect tray_item(int item) {
     int width = gui_text_width(clock_text(clock), 1), right = taskbar().x + taskbar().width - width - 12 - 8;
     int y = taskbar().y + 4, quick = (mixer >= 0 ? TRAY_ICON : 0) + (battery >= 0 ? BATTERY_WIDTH : 0);
     int quick_x = right - TRAY_ICON - (quick ? quick : TRAY_ICON) - 2;
+    int bt_width = bt->adapter ? TRAY_ICON + 2 : 0;
 
     if (item == TRAY_CALENDAR)
         return (struct rect){right + 2, y, width + 16, TASKBAR_HEIGHT - 8};
@@ -1286,8 +1289,10 @@ static struct rect tray_item(int item) {
         return (struct rect){right - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
     if (item == TRAY_NETWORK)
         return (struct rect){quick_x - 2 - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
+    if (item == TRAY_BLUETOOTH)
+        return (struct rect){quick_x - 2 - TRAY_ICON - bt_width, y, bt_width ? TRAY_ICON : 0, TASKBAR_HEIGHT - 8};
     if (item == TRAY_CLIPS)
-        return (struct rect){quick_x - 2 - TRAY_ICON - 2 - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
+        return (struct rect){quick_x - 2 - TRAY_ICON - bt_width - 2 - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
     return (struct rect){quick_x, y, quick ? quick : TRAY_ICON, TASKBAR_HEIGHT - 8};
 }
 
@@ -1297,6 +1302,11 @@ static void report_tray(void) {
 
     printf("wm: quick settings' icons at %d %d %d %d\n", q.x, q.y, q.width, q.height);
     printf("wm: network icon at %d %d %d %d\n", n.x, n.y, n.width, n.height);
+    if (bt->adapter) {
+        struct rect b = tray_item(TRAY_BLUETOOTH);
+
+        printf("wm: bluetooth icon at %d %d %d %d\n", b.x, b.y, b.width, b.height);
+    }
 }
 
 static struct rect tray(void) {
@@ -1380,6 +1390,48 @@ static const char *wifi_note(void) {
                                                                                                              : NULL;
 }
 
+// The Bluetooth panel: a switch, then the devices, connected and paired ones first,
+// then those found nearby while it's open. A device's row opens to what can be done
+// with it, and pairing that needs a yes, or a code typed, says so under the list.
+#define BT_SHOWN 8
+static char bt_opened[64]; // the device whose row is open, by its path, or ""
+static char bt_message[128];
+
+static bool bt_listed(void) {
+    return bt->running && bt->adapter && bt->powered;
+}
+
+static int bt_shown(void) {
+    return !bt_listed() ? 0 : bt->count < BT_SHOWN ? bt->count : BT_SHOWN;
+}
+
+static int bt_open_index(void) {
+    for (int i = 0; bt_opened[0] && i < bt_shown(); i++) {
+        if (!strcmp(bt->devices[i].path, bt_opened))
+            return i;
+    }
+    return -1;
+}
+
+static const char *bt_note(void) {
+    return !bt->running ? "Bluetooth isn't running" : !bt->adapter ? "No Bluetooth adapter" : !bt->powered ? "Bluetooth is off"
+         : !bt->count ? (bt->discovering ? "Looking for devices..." : "No devices found") : NULL;
+}
+
+// Pairing asking for a yes has buttons; a code to type on the device doesn't.
+static bool bt_asks_yes(void) {
+    return bluetooth_request()->asking == BT_CONFIRM || bluetooth_request()->asking == BT_AUTHORIZE;
+}
+
+static int bt_asking_height(void) {
+    return !bluetooth_request()->asking ? 0 : 2 * PANEL_LINE + (bt_asks_yes() ? WIFI_LINE : 0) + 12;
+}
+
+static int bluetooth_height(void) {
+    return 40 + (bt_note() ? PANEL_LINE + 8 : 0) + bt_shown() * WIFI_ROW + (bt_open_index() >= 0 ? WIFI_LINE + 6 : 0)
+         + bt_asking_height() + (bt_message[0] ? PANEL_LINE + 4 : 0) + 6;
+}
+
 static int network_height(void) {
     return 40 + wired_height() + (wifi_note() ? PANEL_LINE + 8 : 0)
          + (wifi_listed() ? (wifi_shown() + 1) * WIFI_ROW + wifi_open_height() : 0) + (wifi_message[0] ? PANEL_LINE + 4 : 0)
@@ -1387,10 +1439,11 @@ static int network_height(void) {
 }
 
 static struct rect panel_rect(int item) {
-    static const int widths[] = {QUICK_WIDTH, NOTICE_WIDTH, NOTICE_WIDTH, NETWORK_WIDTH, 7 * DAY_WIDTH + 24};
+    static const int widths[] = {QUICK_WIDTH, NOTICE_WIDTH, NOTICE_WIDTH, NETWORK_WIDTH, NETWORK_WIDTH, 7 * DAY_WIDTH + 24};
     int heights[] = {12 + TILE_HEIGHT + 12 + sound_height() + laptop_height() + 9 + 6 * PANEL_LINE + 8,
                      40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8),
-                     40 + (clip_count ? clip_count : 1) * CLIP_ROW, network_height(), 40 + 7 * DAY_HEIGHT};
+                     40 + (clip_count ? clip_count : 1) * CLIP_ROW, network_height(), bluetooth_height(),
+                     40 + 7 * DAY_HEIGHT};
     struct rect t = tray_item(item);
     int x = t.x + t.width - widths[item], most = screen.width - GAP - widths[item];
 
@@ -1481,6 +1534,8 @@ static void flyout_leaves(struct rect r);
 static void close_panel(void) {
     if (panel >= 0)
         flyout_leaves(panel_rect(panel));
+    if (panel == TRAY_BLUETOOTH)
+        bluetooth_look(false);
     damage_tray();
     panel = -1;
     setting_volume = setting_brightness = false;
@@ -1955,6 +2010,11 @@ static void open_panel(int item) {
         network_scan();
         printf("wm: wifi panel\n");
     }
+    if (item == TRAY_BLUETOOTH) {
+        bt_opened[0] = bt_message[0] = '\0';
+        bluetooth_look(true);
+        printf("wm: bluetooth panel\n");
+    }
     panel = item;
     panel_opened = now_ms();
     report_panel(item);
@@ -2381,6 +2441,254 @@ static void network_changed(const char *was_joining, int joined) {
     }
 }
 
+// Where the Bluetooth panel's parts are.
+static struct rect bt_switch(void) {
+    struct rect p = panel_rect(TRAY_BLUETOOTH);
+
+    return (struct rect){p.x + p.width - 12 - SWITCH_WIDTH, p.y + 11, SWITCH_WIDTH, 18};
+}
+
+static struct rect bt_row(int i) {
+    struct rect p = panel_rect(TRAY_BLUETOOTH);
+    int open = bt_open_index(), y = p.y + 40 + (bt_note() ? PANEL_LINE + 8 : 0);
+
+    return (struct rect){p.x + 4, y + i * WIFI_ROW + (open >= 0 && i > open ? WIFI_LINE + 6 : 0), p.width - 8, WIFI_ROW};
+}
+
+static const struct bt_device *bt_opened_device(void) {
+    int i = bt_open_index();
+
+    return i >= 0 ? &bt->devices[i] : NULL;
+}
+
+// The open row's buttons, rightmost first, or NULL, and none while it's busy.
+static void bt_buttons(const char *labels[2]) {
+    const struct bt_device *d = bt_opened_device();
+
+    labels[0] = labels[1] = NULL;
+    if (!d || !strcmp(bt->busy, d->path))
+        return;
+    if (d->connected)
+        labels[0] = "Forget", labels[1] = "Disconnect";
+    else if (d->paired)
+        labels[0] = "Connect", labels[1] = "Forget";
+    else
+        labels[0] = "Pair";
+}
+
+static struct rect bt_button(int which) {
+    struct rect r = bt_row(bt_open_index());
+
+    return (struct rect){r.x + r.width - 8 - 90 - which * 98, r.y + r.height + 2, 90, 26};
+}
+
+// What pairing asks, under the list, and its buttons: 0 yes, 1 no.
+static struct rect bt_asking(void) {
+    struct rect r = bt_row(bt_shown());
+
+    return (struct rect){r.x, r.y + 4, r.width, bt_asking_height() - 8};
+}
+
+static struct rect bt_answer(int which) {
+    struct rect a = bt_asking();
+
+    return (struct rect){a.x + a.width - 8 - 90 - which * 98, a.y + 4 + 2 * PANEL_LINE, 90, 26};
+}
+
+static bool bt_on(void) {
+    return bt->powered && !bt->blocked;
+}
+
+// Says where the panel's parts are, when that changes, for the tests to find them.
+static void report_bluetooth(void) {
+    static char last[4096];
+    char now[4096];
+    int n = 0;
+    struct rect s = bt_switch();
+    const char *labels[2];
+
+    n += snprintf(now + n, sizeof(now) - n, "wm: bluetooth %s at %d %d %d %d\n", bt_on() ? "on" : "off", s.x, s.y,
+                  s.width, s.height);
+    for (int i = 0; i < bt_shown() && n < (int)sizeof(now) - 200; i++) {
+        struct rect r = bt_row(i);
+        const struct bt_device *d = &bt->devices[i];
+
+        n += snprintf(now + n, sizeof(now) - n, "wm: bluetooth row %d at %d %d %d %d, %s%s%s\n", i, r.x, r.y, r.width,
+                      r.height, d->name, d->connected ? ", connected" : "", d->paired ? ", paired" : "");
+    }
+    bt_buttons(labels);
+    for (int i = 0; i < 2 && labels[i]; i++) {
+        struct rect b = bt_button(i);
+
+        n += snprintf(now + n, sizeof(now) - n, "wm: bluetooth button %s at %d %d %d %d\n", labels[i], b.x, b.y,
+                      b.width, b.height);
+    }
+    for (int i = 0; bt_asks_yes() && i < 2; i++) {
+        struct rect b = bt_answer(i);
+
+        n += snprintf(now + n, sizeof(now) - n, "wm: bluetooth answer %s at %d %d %d %d\n", i ? "no" : "yes", b.x, b.y,
+                      b.width, b.height);
+    }
+    if (strcmp(now, last))
+        fputs(now, stdout);
+    memcpy(last, now, sizeof(last));
+}
+
+static void damage_bluetooth_panel(void) {
+    struct rect p = panel_rect(TRAY_BLUETOOTH);
+
+    add_damage((struct rect){p.x, 0, p.width, screen.height});
+}
+
+static void draw_bt_row(struct gui_canvas *c, int i, int ox, int oy) {
+    struct rect r = bt_row(i);
+    const struct bt_device *d = &bt->devices[i];
+    const struct gui_image *icon = gui_icon(!strncmp(d->icon, "audio", 5) ? "speaker" : "bluetooth");
+    char state[48], name[64];
+
+    if (!strcmp(bt->busy, d->path))
+        snprintf(state, sizeof(state), "%s...", bt->doing);
+    else if (d->connected && d->battery >= 0)
+        snprintf(state, sizeof(state), "Connected, %d%%", d->battery);
+    else
+        snprintf(state, sizeof(state), "%s", d->connected ? "Connected" : d->paired ? "Paired" : "Not paired");
+    if (bt_open_index() == i || contains(r, cursor_x, cursor_y))
+        gui_fill_rounded(c, r.x - ox, r.y - oy, r.width, r.height, SMALL_RADIUS, TASKBAR_BUTTON);
+    if (icon)
+        gui_draw_image(c, r.x + 10 - ox, r.y + (r.height - ICON_SIZE) / 2 - oy, icon);
+    snprintf(name, sizeof(name), "%.*s", (int)gui_text_fit(d->name, strlen(d->name), r.width - 50), d->name);
+    gui_text(c, r.x + 34 - ox, r.y + 2 - oy, name, TASKBAR_TEXT, 1);
+    gui_text(c, r.x + 34 - ox, r.y + 2 + GUI_CHAR_HEIGHT - oy, state, d->connected ? TITLE_FOCUSED : TASKBAR_DIM_TEXT, 1);
+}
+
+static void draw_bluetooth_panel(struct gui_canvas *c, struct rect p, int ox, int oy) {
+    const struct bt_request *asked = bluetooth_request();
+    struct rect s = bt_switch();
+    const char *note = bt_note(), *labels[2];
+    int y = p.y + 40;
+
+    report_bluetooth();
+    gui_text(c, p.x + 12 - ox, p.y + 12 - oy, "Bluetooth", TASKBAR_TEXT, 1);
+    gui_fill_rounded(c, s.x - ox, s.y - oy, s.width, s.height, s.height / 2, bt_on() ? TITLE_FOCUSED : TASKBAR_BUTTON);
+    gui_fill_rounded(c, s.x + (bt_on() ? s.width - s.height : 0) + 2 - ox, s.y + 2 - oy, s.height - 4, s.height - 4,
+                     (s.height - 4) / 2, 0xFFFFFF);
+    if (note)
+        gui_text(c, p.x + 12 - ox, y - oy, note, TASKBAR_DIM_TEXT, 1);
+    for (int i = 0; i < bt_shown(); i++)
+        draw_bt_row(c, i, ox, oy);
+    bt_buttons(labels);
+    for (int i = 0; i < 2 && labels[i]; i++)
+        draw_button(c, bt_button(i), labels[i], !strcmp(labels[i], "Connect") || !strcmp(labels[i], "Pair"), ox, oy);
+    if (asked->asking) {
+        struct rect a = bt_asking();
+        char line[2][128];
+
+        if (asked->asking == BT_CONFIRM) {
+            snprintf(line[0], sizeof(line[0]), "Pair with %s?", asked->device);
+            snprintf(line[1], sizeof(line[1]), "Check it shows %s.", asked->code);
+        } else if (asked->asking == BT_AUTHORIZE) {
+            snprintf(line[0], sizeof(line[0]), "%s wants to pair.", asked->device);
+            snprintf(line[1], sizeof(line[1]), "Allow it?");
+        } else {
+            snprintf(line[0], sizeof(line[0]), "Type %s on %s,", asked->code, asked->device);
+            snprintf(line[1], sizeof(line[1]), "then press Enter on it.");
+        }
+        gui_fill_rounded(c, a.x - ox, a.y - oy, a.width, a.height, SMALL_RADIUS, TASKBAR_BUTTON);
+        for (int i = 0; i < 2; i++)
+            fitted_text(c, a.x + 10 - ox, a.y + 6 + i * PANEL_LINE - oy, a.width - 20, line[i], TASKBAR_TEXT);
+        if (bt_asks_yes()) {
+            draw_button(c, bt_answer(0), asked->asking == BT_CONFIRM ? "Pair" : "Allow", true, ox, oy);
+            draw_button(c, bt_answer(1), "Cancel", false, ox, oy);
+        }
+    }
+    if (bt_message[0])
+        fitted_text(c, p.x + 12 - ox, p.y + p.height - 6 - PANEL_LINE - oy, p.width - 24, bt_message, TASKBAR_DIM_TEXT);
+}
+
+static void bt_action(const char *label) {
+    const struct bt_device *d = bt_opened_device();
+    char path[64], name[64];
+    bool ok;
+
+    if (!d)
+        return;
+    snprintf(path, sizeof(path), "%s", d->path);
+    snprintf(name, sizeof(name), "%s", d->name);
+    bt_message[0] = '\0';
+    if (!strcmp(label, "Forget")) {
+        ok = bluetooth_forget(path);
+        bt_opened[0] = '\0';
+    } else {
+        ok = !strcmp(label, "Disconnect") ? bluetooth_disconnect(path) : bluetooth_connect(path);
+    }
+    if (ok)
+        printf("wm: bluetooth %s %s\n", label, name);
+    else
+        snprintf(bt_message, sizeof(bt_message), "%s", bluetooth_error());
+}
+
+static void bluetooth_click(void) {
+    const char *labels[2];
+
+    damage_bluetooth_panel();
+    if (contains(bt_switch(), cursor_x, cursor_y)) {
+        bool on = !bt_on();
+
+        if (bluetooth_set_on(on))
+            printf("wm: bluetooth turned %s\n", on ? "on" : "off");
+        else
+            snprintf(bt_message, sizeof(bt_message), "Couldn't turn Bluetooth %s.", on ? "on" : "off");
+        bt_opened[0] = '\0';
+        return;
+    }
+    for (int i = 0; bt_asks_yes() && i < 2; i++) {
+        if (contains(bt_answer(i), cursor_x, cursor_y)) {
+            bluetooth_answer(i == 0);
+            return;
+        }
+    }
+    bt_buttons(labels);
+    for (int i = 0; i < 2 && labels[i]; i++) {
+        if (contains(bt_button(i), cursor_x, cursor_y)) {
+            bt_action(labels[i]);
+            return;
+        }
+    }
+    for (int i = 0; i < bt_shown(); i++) {
+        if (contains(bt_row(i), cursor_x, cursor_y)) {
+            if (i == bt_open_index())
+                bt_opened[0] = '\0';
+            else
+                snprintf(bt_opened, sizeof(bt_opened), "%s", bt->devices[i].path);
+            bt_message[0] = '\0';
+            return;
+        }
+    }
+}
+
+// What BlueZ's said, after poll: the tray, which has Bluetooth's icon while there's an
+// adapter, and the panel, which opens by itself when pairing asks something.
+static void bluetooth_changed(int done) {
+    static bool had_adapter;
+
+    if (bt->adapter != had_adapter) {
+        had_adapter = bt->adapter;
+        damage_taskbar();
+        report_tray();
+    }
+    damage_tray();
+    if (done < 0)
+        snprintf(bt_message, sizeof(bt_message), "%s", bluetooth_error());
+    else if (done > 0)
+        bt_message[0] = '\0';
+    if (bluetooth_request()->asking && panel != TRAY_BLUETOOTH && !locked)
+        open_panel(TRAY_BLUETOOTH);
+    if (panel == TRAY_BLUETOOTH) {
+        damage_bluetooth_panel();
+        report_bluetooth();
+    }
+}
+
 static void close_menu(void);
 
 // The password polkit asks for, when an app wants something only an admin can do,
@@ -2712,14 +3020,17 @@ static void draw_open_panel(struct gui_canvas *c, int unused, int ox, int oy) {
         draw_clips(c, p, ox, oy);
     else if (panel == TRAY_NETWORK)
         draw_network_panel(c, p, ox, oy);
+    else if (panel == TRAY_BLUETOOTH)
+        draw_bluetooth_panel(c, p, ox, oy);
     else
         draw_calendar(c, p, ox, oy);
 }
 
 static void draw_tray(struct gui_canvas *c, int ox, int oy) {
     struct rect q = tray_item(TRAY_QUICK), b = tray_item(TRAY_NOTICES), k = tray_item(TRAY_CLIPS);
-    struct rect n = tray_item(TRAY_NETWORK);
+    struct rect n = tray_item(TRAY_NETWORK), t = tray_item(TRAY_BLUETOOTH);
     const struct gui_image *clip = gui_icon("clipboard"), *theme_icon = gui_icon("theme");
+    const struct gui_image *bluetooth = bt->adapter ? gui_icon(bt_on() ? "bluetooth" : "bluetooth-off") : NULL;
     const struct gui_image *network = gui_icon(connected() ? "network" : net->running && !net->wifi_on ? "airplane" : "offline");
     const struct gui_image *speaker = gui_icon(muted || !volume ? "muted" : "speaker"), *bell = gui_icon("bell");
     int icon_y = q.y + (q.height - ICON_SIZE) / 2;
@@ -2727,9 +3038,11 @@ static void draw_tray(struct gui_canvas *c, int ox, int oy) {
     for (int i = 0; i < TRAY_ITEMS; i++) {
         struct rect t = tray_item(i);
 
-        if (panel == i || contains(t, cursor_x, cursor_y))
+        if (t.width && (panel == i || contains(t, cursor_x, cursor_y)))
             gui_fill_rounded(c, t.x - ox, t.y - oy, t.width, t.height, SMALL_RADIUS, TASKBAR_BUTTON);
     }
+    if (bluetooth)
+        gui_draw_image(c, t.x + (t.width - ICON_SIZE) / 2 - ox, icon_y - oy, bluetooth);
     if (battery >= 0) {
         char percent[8];
 
@@ -2834,6 +3147,10 @@ static bool panel_click(void) {
         return false;
     if (panel == TRAY_NETWORK) {
         network_click();
+        return true;
+    }
+    if (panel == TRAY_BLUETOOTH) {
+        bluetooth_click();
         return true;
     }
     for (int i = 0; panel == TRAY_QUICK && i < TILES; i++) {
@@ -6590,6 +6907,7 @@ int main(int argc, char **argv) {
                             "It runs on the screen itself, or in a window when started on another desktop.\n");
     display = &wm_server;
     net = network_now();
+    bt = bluetooth_now();
     setvbuf(stdout, NULL, _IOLBF, 0); // as the tests read it
     login_mode = argc > 1 && !strcmp(argv[1], "--login");
     commands = argv + 1 + login_mode;
@@ -6650,15 +6968,17 @@ int main(int argc, char **argv) {
     snprintf(shown_clock, sizeof(shown_clock), "%s", clock_text(clock));
     if (!network_open())
         printf("wm: no D-Bus, so no network\n");
+    if (!login_mode && !bluetooth_open())
+        printf("wm: no D-Bus, so no Bluetooth\n");
     if (!login_mode && !polkit_open())
         printf("wm: no polkit agent, so apps can't ask for an admin's password\n");
     find_backlight();
     check_battery();
     report_tray();
     while (!quitting) {
-        struct pollfd fds[6 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
-        struct pollfd *input = fds + 6;
-        int network_wait, polkit_wait, fd_count = 6 + display->poll_fds(input);
+        struct pollfd fds[7 + DISPLAY_FDS] = {{.fd = audio_watch, .events = POLLIN}};
+        struct pollfd *input = fds + 7;
+        int network_wait, polkit_wait, bluetooth_wait, fd_count = 7 + display->poll_fds(input);
 
         fds[4] = (struct pollfd){.fd = update_fd, .events = POLLIN};
         fds[5] = (struct pollfd){.fd = desktop_watch, .events = POLLIN};
@@ -6669,6 +6989,7 @@ int main(int argc, char **argv) {
 
         network_poll(&fds[1], &network_wait);
         polkit_poll(&fds[2], &polkit_wait);
+        bluetooth_poll(&fds[6], &bluetooth_wait);
 
         int preview = check_preview(); // before the flyouts, so their own start moving
         int layout_wait = check_layouts();
@@ -6711,6 +7032,7 @@ int main(int argc, char **argv) {
         timeout = display->max_wait >= 0 && (timeout < 0 || timeout > display->max_wait) ? display->max_wait : timeout;
         timeout = network_wait >= 0 && (timeout < 0 || network_wait < timeout) ? network_wait : timeout;
         timeout = polkit_wait >= 0 && (timeout < 0 || polkit_wait < timeout) ? polkit_wait : timeout;
+        timeout = bluetooth_wait >= 0 && (timeout < 0 || bluetooth_wait < timeout) ? bluetooth_wait : timeout;
         if (update_due >= 0) {
             int64_t wait = update_due - now_ms();
 
@@ -6743,6 +7065,11 @@ int main(int argc, char **argv) {
             network_changed(was_joining, joined);
         if (polkit_read())
             auth_changed();
+
+        int bt_done;
+
+        if (bluetooth_read(&bt_done))
+            bluetooth_changed(bt_done);
         if (update_fd >= 0 && fds[4].revents)
             read_updates();
         if (desktop_watch >= 0 && fds[5].revents) {

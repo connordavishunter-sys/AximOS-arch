@@ -32,7 +32,10 @@ renamed where their names are, on the desktop and in Files. Installed systems up
 from AximOS's own signed repository and Arch's, from Settings' Updates page, which wm
 tells of each day. Files drag from the desktop into apps, and from one app to
 another: the editor, Paint, the viewer and the player open them, Files moves them into
-its folder, and the terminal types their paths.
+its folder, and the terminal types their paths. Bluetooth has its own panel in the
+tray, BlueZ's: it finds devices nearby, pairs and connects, with wm as BlueZ's agent
+for any code pairing asks to be checked or typed, and PipeWire plays through
+headphones and speakers once they're connected.
 
 Still to come: screens beyond the first.
 

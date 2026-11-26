@@ -1,0 +1,8 @@
+# The services wm's panels use, which a system installed before them doesn't have on.
+post_install() {
+    systemctl enable bluetooth.service >/dev/null 2>&1 || true
+}
+
+post_upgrade() {
+    post_install
+}
