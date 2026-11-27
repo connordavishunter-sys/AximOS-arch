@@ -842,6 +842,8 @@ struct window_copy *server_window_copy(struct surface *s) {
     c->blur = wlr_scene_blur_create(c->tree, 0, 0);
     c->border = wlr_scene_rect_create(c->tree, 0, 0, (float[4]){0, 0, 0, 1});
     copy_window(c, s);
+    // Where the window is, until it's placed, as a frame can be shown first.
+    server_copy_place(c, c->look.frame_x, c->look.frame_y, c->look.frame_width, c->look.frame_height, 1);
     return c;
 }
 
