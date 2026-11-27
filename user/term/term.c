@@ -31,10 +31,11 @@
 #define KEY_W 0x11
 #define KEY_F 0x21
 #define MAX_TABS 8
-#define TAB_BAR 26 // across the top, when there's more than one tab
-#define TAB_WIDTH_MAX 160
-#define MENU_WIDTH 160
-#define MENU_ROW 22
+#define FIND "##find"
+#define FIND_BUTTONS 300 // beside the find bar's box: Older, Newer, how it went, and Close
+#define WIDGET_MARGIN 10 // libgui's, around its widgets
+#define FIND_BAR (GUI_CHAR_HEIGHT + 10 + 2 * WIDGET_MARGIN) // a text box's height, and its margins
+#define KEY_Q 0x10
 // How see-through the default background is, in its top byte, which wm reads: as much as title bars.
 #define SEE_THROUGH 0x38000000
 
@@ -46,7 +47,12 @@ static const uint32_t base_colors[16] = {
 
 static struct gui_window *window;
 static struct session *sessions[MAX_TABS];
-static int session_count, active, top = PADDING;
+static int session_count, active;
+static struct gui_ui ui;
+static struct gui_rect area;        // where the cells go, under the tabs and over the find bar
+static bool stale = true;           // the window's to be drawn again, libgui's widgets and all
+static bool mouse_on_widgets;       // the mouse was last over libgui's, rather than the cells
+static int left = PADDING, top = PADDING; // the first cell's top left
 static bool focused, selecting;
 static int drag_x, drag_y; // where the mouse is while selecting
 static long last_press;    // for double clicks
@@ -54,26 +60,21 @@ static uint8_t modifiers;  // held, as the last key said, which mouse events don
 static int mouse_button = -1; // held, for reporting drags to the program
 static volatile sig_atomic_t dump_asked;
 
-// Over the cells: a menu from a right-click, searching what's kept, and the help.
-static const char *const menu_items[] = {"Copy", "Paste", "New tab", "Find...", "Keyboard shortcuts"};
-#define MENU_ITEMS ((int)(sizeof(menu_items) / sizeof(*menu_items)))
-static bool menu_open, help_shown, searching;
-static int menu_x, menu_y;
+// libgui's, around the cells: the tabs, a menu from a right-click, finding what's
+// kept, in a bar under the cells, and the help.
+static bool searching, search_started;
 static char query[64], search_status[64];
 static int found_line = -1;
 
-static const char *const help[] = {
-    "Ctrl+Shift+C, V      Copy and paste",
-    "Ctrl+Shift+T, W      New tab, close the tab",
-    "Ctrl+Tab             Next tab",
-    "Ctrl+Shift+F         Find in what's kept",
-    "Enter, Shift+Enter   Find older, newer",
-    "Shift+Page Up, Down  Scroll back and forth",
-    "Double click         Select a word",
-    "Shift+drag           Select, while a program has the mouse",
-    "Escape               Close this",
-};
-#define HELP_LINES ((int)(sizeof(help) / sizeof(*help)))
+static const char *const help = "Ctrl+Shift+C, V      Copy and paste\n"
+                                "Ctrl+Shift+T, W      New tab, close the tab\n"
+                                "Ctrl+Tab             Next tab\n"
+                                "Ctrl+Shift+F         Find in what's kept\n"
+                                "Enter, Shift+Enter   Find older, newer\n"
+                                "Shift+Page Up, Down  Scroll back and forth\n"
+                                "Double click         Select a word\n"
+                                "Shift+drag           Select, while a program has the mouse\n"
+                                "F1                   This help";
 
 static int clamp(int value, int low, int high) {
     return value < low ? low : value > high ? high : value;
@@ -172,7 +173,7 @@ static void draw_cell(int r, int c) {
     bool wide = cell.ch & ATTR_WIDE, bold = cell.ch & ATTR_BOLD;
     bool cursor = r - t->view == t->row && c == t->col && !t->cursor_hidden && !t->view;
     uint32_t fg = resolve(cell.fg, true, bold), bg = resolve(cell.bg, false, false);
-    int x = PADDING + c * CELL_WIDTH, y = top + r * CELL_HEIGHT, width = (wide && c + 1 < cols ? 2 : 1) * CELL_WIDTH;
+    int x = left + c * CELL_WIDTH, y = top + r * CELL_HEIGHT, width = (wide && c + 1 < cols ? 2 : 1) * CELL_WIDTH;
 
     if (!ch && c > 0 && line[c - 1].ch & ATTR_WIDE)
         return; // the second half of a wide character, drawn with the first
@@ -208,103 +209,31 @@ static void draw_cell(int r, int c) {
 
 // A thumb in the right margin while scrolled back, showing where.
 static void draw_scrollbar(void) {
-    int x = window->canvas.width - PADDING, height = window->canvas.height - top + PADDING, total = t->history_count + rows;
+    int x = area.x + area.width - PADDING, height = area.height, total = t->history_count + rows;
 
-    gui_fill(&window->canvas, x, top - PADDING, PADDING, height, default_bg);
+    gui_fill(&window->canvas, x, area.y, PADDING, height, default_bg);
     if (t->view)
-        gui_fill(&window->canvas, x + 1, top - PADDING + (t->history_count - t->view) * height / total, PADDING - 2,
+        gui_fill(&window->canvas, x + 1, area.y + (t->history_count - t->view) * height / total, PADDING - 2,
                  rows * height / total, colors[8]);
-    gui_update(window, x, top - PADDING, PADDING, height);
+    gui_update(window, x, area.y, PADDING, height);
 }
 
-static uint32_t panel_colour(void) {
-    return (default_bg & 0xFFFFFF) == 0x161A22 ? 0x2B303B : 0xE2E5EB;
+// Whether libgui's showing something over the cells: a menu, or the help.
+static bool over_cells(void) {
+    return ui.popup || ui.help_open || ui.dialog_shown;
 }
 
-static void box_text(int x, int y, const char *s, uint32_t colour) {
-    gui_mono_text(&window->canvas, x, y, s, colour, 1);
-}
-
-// The tabs, across the top when there's more than one, each with an x to close it.
-static int tab_width(void) {
-    int w = (window->canvas.width - 8) / (session_count ? session_count : 1);
-
-    return w < TAB_WIDTH_MAX ? w : TAB_WIDTH_MAX;
-}
-
-static void tab_name(const struct session *s, char *out, size_t size, int fits) {
-    char ascii[sizeof(s->title)];
-    size_t n = 0;
-
-    for (const char *p = s->title; *p && n < sizeof(ascii) - 1; p++) // the bitmap-wide font's tab text is ASCII
-        ascii[n++] = (unsigned char)*p < 0x80 ? *p : '?';
-    ascii[n] = '\0';
-    if (n)
-        snprintf(out, size, "%.*s", fits > 0 ? fits : 0, ascii);
-    else
-        snprintf(out, size, "Shell %d", s->number);
-}
-
-static void draw_tabs(void) {
-    struct gui_canvas *c = &window->canvas;
-    int w = tab_width();
-
-    if (session_count < 2)
-        return;
-    gui_fill(c, 0, 0, c->width, TAB_BAR, panel_colour());
-    for (int i = 0; i < session_count; i++) {
-        char name[64];
-
-        tab_name(sessions[i], name, sizeof(name), (w - 30) / CELL_WIDTH);
-        if (i == active)
-            gui_fill(c, 4 + i * w, 4, w - 2, TAB_BAR - 4, default_bg);
-        box_text(4 + i * w + 8, 6, name, i == active ? default_fg : colors[8]);
-        box_text(4 + (i + 1) * w - 18, 6, "x", colors[8]);
-    }
-    gui_update(window, 0, 0, c->width, TAB_BAR);
-}
-
-// The search bar, over the bottom of the window.
-static void draw_search(void) {
-    struct gui_canvas *c = &window->canvas;
-    char line[160];
-    int y = c->height - CELL_HEIGHT - 8;
-
-    snprintf(line, sizeof(line), "Find: %s_  %s", query, search_status);
-    gui_fill(c, 0, y, c->width, CELL_HEIGHT + 8, panel_colour());
-    box_text(PADDING + 4, y + 4, line, default_fg);
-    gui_update(window, 0, y, c->width, CELL_HEIGHT + 8);
-}
-
-static void draw_menu(void) {
-    gui_fill(&window->canvas, menu_x, menu_y, MENU_WIDTH, MENU_ITEMS * MENU_ROW + 8, panel_colour());
-    for (int i = 0; i < MENU_ITEMS; i++)
-        box_text(menu_x + 10, menu_y + 4 + i * MENU_ROW + 3, menu_items[i], default_fg);
-    gui_update(window, menu_x, menu_y, MENU_WIDTH, MENU_ITEMS * MENU_ROW + 8);
-}
-
-static void draw_help(void) {
-    int w = 54 * CELL_WIDTH + 32, h = HELP_LINES * CELL_HEIGHT + 32;
-    int x = (window->canvas.width - w) / 2, y = (window->canvas.height - h) / 2;
-
-    gui_fill(&window->canvas, x, y, w, h, panel_colour());
-    for (int i = 0; i < HELP_LINES; i++)
-        box_text(x + 16, y + 16 + i * CELL_HEIGHT, help[i], default_fg);
-    gui_update(window, x, y, w, h);
-}
-
-// What goes over the cells, drawn again after them each time.
-static void draw_over(void) {
-    if (searching)
-        draw_search();
-    if (help_shown)
-        draw_help();
-    if (menu_open)
-        draw_menu();
-}
+// The cells that changed, or all of the window, libgui's widgets and all, when
+// they've changed, or there's something of theirs over the cells.
+static void frame(void);
 
 static void draw(void) {
     static int drawn_view;
+
+    if (stale || over_cells()) {
+        frame();
+        return;
+    }
     int first = rows, last = -1;
 
     // Changes on the screen move about the window while scrolled back.
@@ -325,15 +254,13 @@ static void draw(void) {
         last = r;
     }
     if (last >= 0)
-        gui_update(window, PADDING, top + first * CELL_HEIGHT, cols * CELL_WIDTH, (last - first + 1) * CELL_HEIGHT);
-    draw_over();
+        gui_update(window, left, top + first * CELL_HEIGHT, cols * CELL_WIDTH, (last - first + 1) * CELL_HEIGHT);
 }
 
 void vt_title_changed(void) {
-    if (window && t == sessions[active]) {
+    if (window && t == sessions[active])
         gui_set_title(window, t->title[0] ? t->title : "Terminal");
-        draw_tabs();
-    }
+    stale |= session_count > 1; // the tab's name
 }
 
 // For the tests: the active tab's screen, its text a row a line, and where the cursor is.
@@ -427,7 +354,7 @@ static bool program_has_mouse(const struct gui_message *e) {
     if (!t->mouse || modifiers & KEY_MOD_SHIFT || e->y < top || t->view)
         return false;
 
-    int col = clamp((e->x - PADDING) / CELL_WIDTH, 0, cols - 1), row = clamp((e->y - top) / CELL_HEIGHT, 0, rows - 1);
+    int col = clamp((e->x - left) / CELL_WIDTH, 0, cols - 1), row = clamp((e->y - top) / CELL_HEIGHT, 0, rows - 1);
 
     if (e->type == GUI_MOUSE_BUTTON) {
         for (int b = 0; b < 3; b++) {
@@ -471,6 +398,13 @@ static void paste(int master) {
     free(text);
 }
 
+// Pastes into the program, taking the view back down to it.
+static void paste_here(void) {
+    if (t->view)
+        scroll_view(-t->view);
+    paste(t->master);
+}
+
 // A file dropped on the window types its path, quoted for the shell, and a space,
 // as if it were pasted.
 static void drop_path(int master, const char *path) {
@@ -497,7 +431,7 @@ static void drop_path(int master, const char *path) {
 
 // The cell under a point in the window.
 static struct place place_at(int x, int y) {
-    return (struct place){shown_line(clamp((y - top) / CELL_HEIGHT, 0, rows - 1)), clamp((x - PADDING) / CELL_WIDTH, 0, cols - 1)};
+    return (struct place){shown_line(clamp((y - top) / CELL_HEIGHT, 0, rows - 1)), clamp((x - left) / CELL_WIDTH, 0, cols - 1)};
 }
 
 static bool is_space(const struct cell *c) {
@@ -601,7 +535,6 @@ static void copy_selection(void) {
 
 // --- Tabs and the window ---
 
-static void paint_background(void);
 
 // How much of a line has text: all of it if it goes on in the next, or else up to
 // its last cell that isn't blank.
@@ -753,16 +686,12 @@ fitted:
     t = was;
 }
 
-// Lays the window out again: the tab bar if there's more than one tab, and every
-// terminal fitted under it.
-static void layout(void) {
-    int width = window->canvas.width, height = window->canvas.height;
+// Fits every terminal to the area the cells have, under the tabs and over the find bar.
+static void fit_area(void) {
+    int new_cols = clamp((area.width - 2 * PADDING) / CELL_WIDTH, 1, MAX_COLS - 1); // the last's for LINE_WRAPS
+    int new_rows = clamp((area.height - 2 * PADDING) / CELL_HEIGHT, 1, MAX_ROWS);
 
-    top = PADDING + (session_count > 1 ? TAB_BAR : 0);
-
-    int new_cols = clamp((width - 2 * PADDING) / CELL_WIDTH, 1, MAX_COLS - 1); // the last's for LINE_WRAPS
-    int new_rows = clamp((height - top - PADDING) / CELL_HEIGHT, 1, MAX_ROWS);
-
+    left = area.x + PADDING, top = area.y + PADDING;
     if (new_cols != cols || new_rows != rows) {
         for (int i = 0; i < session_count; i++)
             fit(sessions[i], new_cols, new_rows);
@@ -770,21 +699,6 @@ static void layout(void) {
         rows = new_rows;
     }
     t = sessions[active];
-    paint_background();
-    draw();
-    draw_scrollbar();
-    gui_show(window);
-}
-
-static void resize(int width, int height) {
-    if (gui_resize(window, width, height))
-        layout();
-}
-
-static void paint_background(void) {
-    gui_fill(&window->canvas, 0, 0, window->canvas.width, window->canvas.height, default_bg);
-    draw_tabs();
-    mark_all_dirty();
 }
 
 static bool new_session(char **command) {
@@ -827,8 +741,7 @@ static bool new_session(char **command) {
     t = s;
     printf("term: tab %d of %d\n", active + 1, session_count);
     fflush(stdout);
-    if (window)
-        layout();
+    stale = true;
     return true;
 }
 
@@ -839,10 +752,7 @@ static void switch_to(int index) {
     printf("term: tab %d of %d\n", active + 1, session_count);
     fflush(stdout);
     vt_title_changed();
-    paint_background();
-    draw();
-    draw_scrollbar();
-    gui_show(window);
+    stale = true;
 }
 
 // Closing the master hangs up whatever is running on the terminal.
@@ -859,7 +769,7 @@ static void close_session(int index) {
     fflush(stdout);
     t = sessions[active];
     vt_title_changed();
-    layout();
+    stale = true;
 }
 
 // Searches what's kept for the query, from the line before or after the last found,
@@ -898,109 +808,133 @@ static void find(bool older) {
     fflush(stdout);
 }
 
-// Keys while searching type what to find.
-static void search_key(const struct key_event *k) {
-    size_t length = strlen(query);
-
-    if (k->code == KEY_ESCAPE) {
-        searching = false;
-        paint_background();
-        return;
-    }
-    if (k->code == KEY_ENTER)
-        find(!(k->modifiers & KEY_MOD_SHIFT));
-    else if (k->code == KEY_BACKSPACE && length)
-        query[length - 1] = '\0';
-    else if (k->text >= ' ' && k->text < 127 && length < sizeof(query) - 1 && !(k->modifiers & KEY_MOD_CTRL))
-        query[length] = (char)k->text, query[length + 1] = '\0';
-    if (k->code != KEY_ENTER)
-        found_line = -1;
-}
-
 static void start_search(void) {
-    searching = true;
+    searching = search_started = stale = true;
     query[0] = search_status[0] = '\0';
     found_line = -1;
 }
 
-static void close_over(void) {
-    menu_open = help_shown = false;
-    paint_background();
+static void stop_search(void) {
+    searching = false;
+    stale = true;
 }
 
-static void choose(int item) {
-    close_over();
-    if (item == 0) {
-        copy_selection();
-    } else if (item == 1) {
-        if (t->view)
-            scroll_view(-t->view);
-        paste(t->master);
-    } else if (item == 2) {
-        new_session(NULL);
-    } else if (item == 3) {
-        start_search();
-    } else if (item == 4) {
-        help_shown = true;
+// The window, as libgui draws it: the tabs, when there's more than one, the cells
+// under them, the find bar under those while searching, and over them, the menu a
+// right-click opens and the help. Each terminal's fitted to the cells' area.
+static void frame(void) {
+    struct gui_canvas *c = &window->canvas;
+    const char *names[MAX_TABS];
+    char named[MAX_TABS][32];
+    int chosen = active, closing = -1;
+
+    stale = false;
+    gui_ui_begin(&ui);
+    gui_help(&ui, help);
+    if (session_count > 1) {
+        for (int i = 0; i < session_count; i++) {
+            snprintf(named[i], sizeof(named[i]), "%s", sessions[i]->title);
+            if (!named[i][0])
+                snprintf(named[i], sizeof(named[i]), "Shell %d", sessions[i]->number);
+            names[i] = named[i];
+        }
+
+        int r = gui_tabs(&ui, names, session_count, &chosen, &closing);
+
+        if (r == GUI_TABS_CHANGED)
+            switch_to(chosen);
+        else if (r == GUI_TABS_CLOSE)
+            close_session(closing);
+        else if (r == GUI_TABS_NEW)
+            new_session(NULL);
+        if (!session_count)
+            return;
     }
+
+    // The cells, from under the tabs to the bottom, or the find bar.
+    int find_bar = searching ? FIND_BAR : 0, y = session_count > 1 ? ui.layout.y - WIDGET_MARGIN : 0;
+
+    area = (struct gui_rect){0, y, c->width, c->height - y - find_bar};
+    fit_area();
+    gui_fill(c, area.x, area.y, area.width, area.height, default_bg);
+    mark_all_dirty();
+    for (int r = 0; r < rows; r++) {
+        for (int col = 0; col < cols; col++)
+            draw_cell(r, col);
+        dirty[r] = false;
+    }
+    draw_scrollbar();
+
+    // Finding: Enter finds older, Shift+Enter newer, and Escape stops.
+    if (searching) {
+        ui.layout.y = area.y + area.height + WIDGET_MARGIN;
+        ui.layout.x = ui.layout.left;
+        if (search_started)
+            gui_set_focus(&ui, FIND, NULL);
+        search_started = false;
+        gui_column_begin(&ui, c->width - FIND_BUTTONS); // the box, and the buttons beside it
+        if (gui_textbox(&ui, FIND, query, sizeof(query)))
+            found_line = -1;
+        gui_column_end(&ui);
+        if (gui_button(&ui, "Older") || (gui_key(&ui, KEY_ENTER) && !(modifiers & KEY_MOD_SHIFT)))
+            find(true);
+        gui_same_line(&ui);
+        if (gui_button(&ui, "Newer") || (gui_key(&ui, KEY_ENTER) && modifiers & KEY_MOD_SHIFT))
+            find(false);
+        gui_same_line(&ui);
+        gui_label(&ui, "%s", search_status);
+        gui_same_line(&ui);
+        if (gui_button(&ui, "Close") || gui_key(&ui, KEY_ESCAPE))
+            stop_search();
+    }
+
+    if (gui_context_menu(&ui, "##menu", area)) {
+        if (gui_menu_icon_item(&ui, "Copy", gui_icon("copy")))
+            copy_selection();
+        if (gui_menu_icon_item(&ui, "Paste", gui_icon("clipboard")))
+            paste_here();
+        gui_menu_separator(&ui);
+        if (gui_menu_icon_item(&ui, "New tab", gui_icon("add")))
+            new_session(NULL);
+        if (gui_menu_icon_item(&ui, "Find...", gui_icon("find")))
+            start_search();
+        if (gui_menu_icon_item(&ui, "Keyboard shortcuts", gui_icon("keyboard")))
+            gui_help_open(&ui);
+        gui_menu_end(&ui);
+    }
+    if (!over_cells() && ui.mouse_y >= area.y && ui.mouse_y < area.y + area.height)
+        ui.cursor = GUI_CURSOR_TEXT;
+    gui_ui_end(&ui);
 }
 
-// The mouse on the tabs, a menu or the help, returning whether it was theirs.
-static bool mouse_over(const struct gui_message *e) {
-    bool pressed = e->type == GUI_MOUSE_BUTTON && (e->buttons & ~e->changed) == 0 && e->buttons;
-    bool right = pressed && (e->changed & 2);
+// Whether an event's libgui's: the mouse over its widgets, or anywhere while it's
+// showing something over the cells, a right-click on them, which opens the menu,
+// and the keys while the find bar or something over the cells has them.
+static bool for_widgets(const struct gui_message *e) {
+    bool mouse = e->type == GUI_MOUSE_MOVE || e->type == GUI_MOUSE_BUTTON || e->type == GUI_MOUSE_WHEEL;
+    bool outside = e->y < area.y || e->y >= area.y + area.height;
+    bool right = e->type == GUI_MOUSE_BUTTON && (e->changed & 2) && (e->buttons & 2);
 
-    if (menu_open && pressed) {
-        int item = (e->y - menu_y - 4) / MENU_ROW;
+    if (mouse && !selecting) {
+        bool was = mouse_on_widgets;
 
-        if (e->x >= menu_x && e->x < menu_x + MENU_WIDTH && e->y >= menu_y + 4 && item < MENU_ITEMS && !right)
-            choose(item);
-        else
-            close_over();
-        if (!right)
-            return true;
+        mouse_on_widgets = outside || over_cells();
+        return mouse_on_widgets || was || (right && !program_has_mouse(e));
     }
-    if (help_shown && pressed) {
-        close_over();
-        return true;
-    }
-    if (pressed && session_count > 1 && e->y < TAB_BAR) {
-        int i = (e->x - 4) / tab_width();
-
-        if (i >= 0 && i < session_count && e->x >= 4 + (i + 1) * tab_width() - 22)
-            close_session(i);
-        else if (i >= 0 && i < session_count)
-            switch_to(i);
-        return true;
-    }
-    if (program_has_mouse(e))
-        return true;
-    if (right) {
-        menu_x = clamp(e->x, 0, window->canvas.width - MENU_WIDTH);
-        menu_y = clamp(e->y, 0, window->canvas.height - MENU_ITEMS * MENU_ROW - 8);
-        menu_open = true;
-        return true;
-    }
-    return e->type == GUI_MOUSE_BUTTON && e->y < top - PADDING && !selecting;
+    if (e->type == GUI_KEY) // Ctrl+Q is the program's, which libgui would quit for
+        return (over_cells() || (searching && gui_focused(&ui, FIND)) || e->key.code == KEY_F1)
+               && !((e->key.modifiers & KEY_MOD_CTRL) && e->key.code == KEY_Q);
+    return e->type == GUI_TIMER || e->type == GUI_REDRAW;
 }
 
 // Keys for the window rather than the program: copying and pasting, tabs and finding.
 static bool window_key(const struct key_event *k) {
     bool shifted = k->modifiers & KEY_MOD_SHIFT, ctrl = k->modifiers & KEY_MOD_CTRL;
 
-    if (help_shown || menu_open) {
-        if (k->code == KEY_ESCAPE)
-            close_over();
-        return true;
-    }
-    if (searching) {
-        search_key(k);
-        return true;
-    }
     if (ctrl && shifted && k->code == KEY_C)
         copy_selection();
     else if (ctrl && shifted && k->code == KEY_V)
-        choose(1);
+        paste_here();
     else if (ctrl && shifted && k->code == KEY_T)
         new_session(NULL);
     else if (ctrl && shifted && k->code == KEY_W)
@@ -1049,7 +983,8 @@ int main(int argc, char **argv) {
     }
     gui_set_cursor(window, GUI_CURSOR_TEXT);
     gui_set_translucent(window, true);
-    layout();
+    gui_ui_init(&ui, window);
+    frame();
 
     while (session_count) {
         struct pollfd fds[1 + MAX_TABS] = {{.fd = gui_fd(), .events = POLLIN}};
@@ -1104,7 +1039,11 @@ int main(int argc, char **argv) {
 
         int got = gui_wait_event(&e, 0);
 
-        if (got == 1) {
+        if (got == 1 && for_widgets(&e)) {
+            if (e.type == GUI_KEY)
+                modifiers = e.key.modifiers;
+            stale |= gui_ui_event(&ui, &e);
+        } else if (got == 1) {
             // Keys go to the program, taking the view back to the bottom, unless
             // they're the window's.
             if (e.type == GUI_KEY) {
@@ -1112,7 +1051,7 @@ int main(int argc, char **argv) {
                 if (e.key.pressed && !window_key(&e.key) && send_key(t->master, &e.key) && t->view)
                     scroll_view(-t->view);
             } else if (e.type == GUI_MOUSE_MOVE || e.type == GUI_MOUSE_BUTTON) {
-                if (!mouse_over(&e))
+                if (!program_has_mouse(&e))
                     mouse(&e);
             } else if (e.type == GUI_MOUSE_WHEEL) {
                 if (program_has_mouse(&e))
@@ -1123,6 +1062,8 @@ int main(int argc, char **argv) {
                 else
                     scroll_view(-e.wheel * WHEEL_LINES);
             } else if (e.type == GUI_FOCUS) {
+                gui_ui_event(&ui, &e);
+                stale |= over_cells() || searching;
                 focused = e.focused;
                 dirty[t->row] = true;
                 if (t->focus_events)
@@ -1133,10 +1074,11 @@ int main(int argc, char **argv) {
                 if (gui_dropped_file(&e, path))
                     drop_path(t->master, path);
             } else if (e.type == GUI_RESIZE) {
-                resize(e.width, e.height);
+                stale |= gui_ui_event(&ui, &e);
             } else if (e.type == GUI_SETTINGS) {
+                gui_ui_event(&ui, &e);
                 use_theme();
-                layout();
+                stale = true;
             } else if (e.type == GUI_CLOSE) {
                 break;
             }
