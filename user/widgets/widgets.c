@@ -46,14 +46,14 @@ static void toggle_progress(void) {
 static void menus(struct gui_ui *ui) {
     gui_menu_bar(ui);
     if (gui_menu(ui, "File")) {
-        if (gui_menu_item(ui, "Reset count"))
+        if (gui_menu_icon_item(ui, "Reset count", gui_icon("refresh")))
             printf("widgets: count %d\n", count = 0);
-        if (gui_menu_item(ui, "Quit"))
+        if (gui_menu_icon_item(ui, "Quit", gui_icon("logout")))
             quitting = true;
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "View")) {
-        if (gui_menu_item(ui, show_progress ? "Hide progress" : "Show progress"))
+        if (gui_menu_icon_item(ui, show_progress ? "Hide progress" : "Show progress", gui_icon("progress")))
             toggle_progress();
         gui_menu_end(ui);
     }

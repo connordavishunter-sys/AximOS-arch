@@ -441,15 +441,15 @@ static void toggle(bool *option, const char *name) {
 static void menus(struct gui_ui *ui) {
     gui_menu_bar(ui);
     if (gui_menu(ui, "File")) {
-        if (gui_menu_item(ui, "New tab"))
+        if (gui_menu_icon_item(ui, "New tab", gui_icon("add")))
             new_doc();
-        if (gui_menu_item(ui, "Open..."))
+        if (gui_menu_icon_item(ui, "Open...", gui_icon("open")))
             pick(false);
-        if (gui_menu_item(ui, "Save"))
+        if (gui_menu_icon_item(ui, "Save", gui_icon("save")))
             save();
-        if (gui_menu_item(ui, "Save as..."))
+        if (gui_menu_icon_item(ui, "Save as...", gui_icon("save-as")))
             pick(true);
-        if (gui_menu_item(ui, "Close tab"))
+        if (gui_menu_icon_item(ui, "Close tab", gui_icon("close")))
             close_tab(active);
         if (recent_count)
             gui_menu_separator(ui);
@@ -459,7 +459,7 @@ static void menus(struct gui_ui *ui) {
             const char *slash = strrchr(recent[i], '/');
 
             snprintf(label, sizeof(label), "%s##recent%d", slash ? slash + 1 : recent[i], i);
-            if (gui_menu_item(ui, label)) {
+            if (gui_menu_icon_item(ui, label, gui_file_icon(recent[i], false))) {
                 char chosen[GUI_PATH_MAX];
 
                 snprintf(chosen, sizeof(chosen), "%s", recent[i]);
@@ -467,40 +467,41 @@ static void menus(struct gui_ui *ui) {
             }
         }
         gui_menu_separator(ui);
-        if (gui_menu_item(ui, "Quit"))
+        if (gui_menu_icon_item(ui, "Quit", gui_icon("logout")))
             quit();
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "Edit")) {
         static const char *const items[] = {"Undo", "Redo", "Cut", "Copy", "Paste", "Select all"};
+        static const char *const icons[] = {"undo", "redo", "cut", "copy", "clipboard", "select-all"};
         static const char letters[] = "zyxcva";
 
         for (int i = 0; i < 6; i++) {
             if (i == 2)
                 gui_menu_separator(ui);
-            if (gui_menu_item(ui, items[i]))
+            if (gui_menu_icon_item(ui, items[i], gui_icon(icons[i])))
                 send_key(ui, letters[i]);
         }
         gui_menu_separator(ui);
-        if (gui_menu_item(ui, "Find..."))
+        if (gui_menu_icon_item(ui, "Find...", gui_icon("find")))
             open_bar(FINDING);
-        if (gui_menu_item(ui, "Find next"))
+        if (gui_menu_icon_item(ui, "Find next", gui_icon("find")))
             find_next(ui);
-        if (gui_menu_item(ui, "Replace..."))
+        if (gui_menu_icon_item(ui, "Replace...", gui_icon("replace")))
             open_bar(REPLACING);
-        if (gui_menu_item(ui, "Go to line..."))
+        if (gui_menu_icon_item(ui, "Go to line...", gui_icon("goto")))
             open_bar(GOING);
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "View")) {
-        if (gui_menu_item(ui, line_numbers ? "Hide line numbers" : "Show line numbers"))
+        if (gui_menu_icon_item(ui, line_numbers ? "Hide line numbers" : "Show line numbers", gui_icon("line-numbers")))
             toggle(&line_numbers, "line numbers");
-        if (gui_menu_item(ui, wrap ? "Don't wrap lines" : "Wrap lines"))
+        if (gui_menu_icon_item(ui, wrap ? "Don't wrap lines" : "Wrap lines", gui_icon("wrap")))
             toggle(&wrap, "wrapping");
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "Help")) {
-        if (gui_menu_item(ui, "Keyboard shortcuts"))
+        if (gui_menu_icon_item(ui, "Keyboard shortcuts", gui_icon("keyboard")))
             gui_help_open(ui);
         gui_menu_end(ui);
     }

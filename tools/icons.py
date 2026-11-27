@@ -225,6 +225,51 @@ def draw(name):
     elif name == 'undo':
         i.arc(17, 18, 9, 200, 450, GREY_LIGHT, 3)
         i.poly([(3, 12), (12, 6), (12, 18)], GREY_LIGHT)
+    elif name == 'actual-size':
+        i.rect(3, 6, 29, 26, outline=GREY_LIGHT, width=2.5, radius=2.5)
+        i.line([(9, 12), (11, 10.5), (11, 21)], GREY_LIGHT, 2.2)
+        i.circle(16, 13, 1.4, fill=GREY_LIGHT)
+        i.circle(16, 19, 1.4, fill=GREY_LIGHT)
+        i.line([(19, 12), (21, 10.5), (21, 21)], GREY_LIGHT, 2.2)
+    elif name == 'goto':
+        lines(i, 4, 28, [7, 25], GREY_LIGHT, 2.5)
+        i.line([(4, 16), (20, 16)], BLUE_LIGHT, 3)
+        i.poly([(18, 10), (28, 16), (18, 22)], BLUE_LIGHT)
+    elif name == 'line-numbers':
+        for n, y in enumerate((7, 16, 25)):
+            i.rect(3, y - 2, 8, y + 2, BLUE_LIGHT, 1)
+            i.line([(12, y), (29, y)], GREY_LIGHT, 2.5)
+    elif name == 'progress':
+        i.rect(2, 11, 30, 21, outline=GREY_LIGHT, width=2.5, radius=5)
+        i.rect(5, 14, 19, 18, BLUE_LIGHT, 2)
+    elif name == 'redo':
+        i.arc(15, 18, 9, 90, 340, GREY_LIGHT, 3)
+        i.poly([(29, 12), (20, 6), (20, 18)], GREY_LIGHT)
+    elif name == 'replace':
+        i.line([(5, 10), (24, 10)], GREY_LIGHT, 3)
+        i.poly([(22, 4), (30, 10), (22, 16)], GREY_LIGHT)
+        i.line([(8, 22), (27, 22)], BLUE_LIGHT, 3)
+        i.poly([(10, 16), (2, 22), (10, 28)], BLUE_LIGHT)
+    elif name == 'save' or name == 'save-as':
+        i.rect(3, 3, 29, 29, BLUE, 3)
+        i.rect(8, 3, 24, 12, (220, 228, 245), 1)
+        i.rect(18, 5, 21, 10, BLUE, 0.5)
+        i.rect(7, 17, 25, 29, PAPER, 1)
+        if name == 'save-as':
+            i.line([(30, 14), (19, 25)], ORANGE, 4)
+            i.poly([(17, 23.5), (20.5, 27), (15.5, 28.5)], (90, 70, 50))
+    elif name == 'wrap':
+        i.line([(4, 8), (28, 8)], GREY_LIGHT, 2.5)
+        i.line([(4, 16), (24, 16)], GREY_LIGHT, 2.5)
+        i.arc(24, 20, 4, 270, 450, GREY_LIGHT, 2.5)
+        i.line([(24, 24), (14, 24)], GREY_LIGHT, 2.5)
+        i.poly([(16, 19.5), (10, 24), (16, 28.5)], GREY_LIGHT)
+    elif name == 'zoom-in' or name == 'zoom-out':
+        i.circle(13, 13, 9, outline=GREY_LIGHT, width=3)
+        i.line([(20, 20), (28, 28)], GREY_LIGHT, 4)
+        i.line([(9, 13), (17, 13)], GREY_LIGHT, 2.5)
+        if name == 'zoom-in':
+            i.line([(13, 9), (13, 17)], GREY_LIGHT, 2.5)
     elif name == 'audio':
         page(i)
         note(i, RED, 14, 10)
@@ -369,7 +414,7 @@ def draw(name):
     return i
 
 
-for name in ('bluetooth', 'bluetooth-off', 'drive') + ('add', 'close', 'copy', 'cut', 'delete', 'find', 'fullscreen', 'gear', 'info', 'keyboard', 'link', 'maximize', 'minimize', 'new-file', 'new-folder', 'open', 'position', 'refresh', 'rename', 'restore', 'select-all', 'undo'):  # new ones, at 1x too
+for name in ('bluetooth', 'bluetooth-off', 'drive') + ('add', 'close', 'copy', 'cut', 'delete', 'find', 'fullscreen', 'gear', 'info', 'keyboard', 'link', 'maximize', 'minimize', 'new-file', 'new-folder', 'open', 'position', 'refresh', 'rename', 'restore', 'select-all', 'undo', 'actual-size', 'goto', 'line-numbers', 'progress', 'redo', 'replace', 'save', 'save-as', 'wrap', 'zoom-in', 'zoom-out'):  # new ones, at 1x too
     if not os.path.exists(os.path.join(ICONS, name + '.png')):
         draw(name).image.resize((16, 16), Image.LANCZOS).save(os.path.join(ICONS, name + '.png'))
 

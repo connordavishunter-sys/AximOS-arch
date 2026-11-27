@@ -790,48 +790,48 @@ static void painting(struct gui_ui *ui) {
         gui_help(ui, help);
     gui_menu_bar(ui);
     if (gui_menu(ui, "File")) {
-        if (gui_menu_item(ui, "New"))
+        if (gui_menu_icon_item(ui, "New", gui_icon("new-file")))
             go_ahead(NEW);
-        if (gui_menu_item(ui, "Open..."))
+        if (gui_menu_icon_item(ui, "Open...", gui_icon("open")))
             go_ahead(OPEN);
-        if (gui_menu_item(ui, "Save"))
+        if (gui_menu_icon_item(ui, "Save", gui_icon("save")))
             save();
-        if (gui_menu_item(ui, "Save as..."))
+        if (gui_menu_icon_item(ui, "Save as...", gui_icon("save-as")))
             pick(true);
         gui_menu_separator(ui);
-        if (gui_menu_item(ui, "Quit"))
+        if (gui_menu_icon_item(ui, "Quit", gui_icon("logout")))
             go_ahead(CLOSE);
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "Edit")) {
-        if (gui_menu_item(ui, "Undo"))
+        if (gui_menu_icon_item(ui, "Undo", gui_icon("undo")))
             undo_last();
-        if (gui_menu_item(ui, "Redo"))
+        if (gui_menu_icon_item(ui, "Redo", gui_icon("redo")))
             redo_last();
         gui_menu_separator(ui);
-        if (gui_menu_item(ui, "Cut"))
+        if (gui_menu_icon_item(ui, "Cut", gui_icon("cut")))
             cut_picture();
-        if (gui_menu_item(ui, "Copy"))
+        if (gui_menu_icon_item(ui, "Copy", gui_icon("copy")))
             copy_picture();
-        if (gui_menu_item(ui, "Paste"))
+        if (gui_menu_icon_item(ui, "Paste", gui_icon("clipboard")))
             paste_picture();
-        if (gui_menu_item(ui, "Clear"))
+        if (gui_menu_icon_item(ui, "Clear", gui_icon("delete")))
             clear_selection();
-        if (gui_menu_item(ui, "Select all"))
+        if (gui_menu_icon_item(ui, "Select all", gui_icon("select-all")))
             select_all();
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "View")) {
-        if (gui_menu_item(ui, "Zoom in"))
+        if (gui_menu_icon_item(ui, "Zoom in", gui_icon("zoom-in")))
             zoom_by(1);
-        if (gui_menu_item(ui, "Zoom out"))
+        if (gui_menu_icon_item(ui, "Zoom out", gui_icon("zoom-out")))
             zoom_by(-1);
-        if (gui_menu_item(ui, "Actual size"))
+        if (gui_menu_icon_item(ui, "Actual size", gui_icon("actual-size")))
             zoom_by(0);
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "Help")) {
-        if (gui_menu_item(ui, "Keyboard shortcuts"))
+        if (gui_menu_icon_item(ui, "Keyboard shortcuts", gui_icon("keyboard")))
             gui_help_open(ui);
         gui_menu_end(ui);
     }
