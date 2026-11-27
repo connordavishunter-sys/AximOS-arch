@@ -1,8 +1,10 @@
+#include "drives.h"
 #include <aximos.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <gui.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -744,7 +746,7 @@ static void make_new(bool is_folder) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[9];
+    static struct gui_rect places[11];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -794,26 +796,97 @@ static void toggle_hidden(void) {
     printf("files: hidden files %s\n", show_hidden ? "shown" : "hidden");
 }
 
-// Places down the side, the one this folder is highlighted, and how the folder's
-// listed under them.
+// The drive the folder shown is on, or -1.
+static int drive_shown(void) {
+    for (int i = 0; i < drive_count; i++) {
+        size_t n = strlen(drives[i].mount);
+
+        if (n && !strncmp(folder, drives[i].mount, n) && (!folder[n] || folder[n] == '/'))
+            return i;
+    }
+    return -1;
+}
+
+// A drive opened from the side: mounted, if it isn't, and shown.
+static void open_drive(int i) {
+    char error[256];
+
+    remember();
+    if (!drive_mount(&drives[i], error, sizeof(error))) {
+        snprintf(status, sizeof(status), "Can't open %s: %s", drives[i].name, error);
+        printf("files: can't mount %s: %s\n", drives[i].name, error);
+        return;
+    }
+    printf("files: mounted %s at %s\n", drives[i].name, drives[i].mount);
+    read_folder(drives[i].mount, NULL);
+}
+
+// The drive shown unmounted and powered off, so it can be taken out, and home shown.
+static void eject_drive(int i) {
+    struct drive d = drives[i];
+    char error[256];
+
+    if (!drive_eject(&d, error, sizeof(error))) {
+        snprintf(status, sizeof(status), "Can't eject %s: %s", d.name, error);
+        printf("files: can't eject %s: %s\n", d.name, error);
+        return;
+    }
+    read_folder(place_paths[0], NULL);
+    snprintf(status, sizeof(status), "%s can be taken out", d.name);
+    printf("files: ejected %s\n", d.name);
+}
+
+// Says where each drive is down the side, for the tests, when they change.
+static void report_drives(struct gui_rect list) {
+    static char said[DRIVES_MAX * 80 + 64];
+    char now[sizeof(said)];
+    int n = snprintf(now, sizeof(now), "files: drives:");
+
+    for (int i = 0; i < drive_count; i++)
+        n += snprintf(now + n, sizeof(now) - n, " %s at %d %d %d %d%s;", drives[i].name, list.x,
+                      list.y + 2 + (PLACE_COUNT + i) * (GUI_CHAR_HEIGHT + 6), list.width, GUI_CHAR_HEIGHT + 6,
+                      drives[i].mount[0] ? " mounted" : "");
+    if (strcmp(now, said))
+        printf("%s\n", now);
+    snprintf(said, sizeof(said), "%s", now);
+}
+
+// Places down the side, then the drives plugged in, the one this folder's in
+// highlighted, and how the folder's listed under them.
 static void sidebar(struct gui_ui *ui) {
     static const char *const sorts[] = {"By name", "By size", "By date"};
-    int by = sort_by;
+    int by = sort_by, count = PLACE_COUNT + drive_count, on = drive_shown();
     bool hidden = show_hidden;
-    const struct gui_image *place_icons[PLACE_COUNT];
-    int at = -1;
+    const char *names[PLACE_COUNT + DRIVES_MAX];
+    const struct gui_image *place_icons[PLACE_COUNT + DRIVES_MAX];
+    int at = on >= 0 ? PLACE_COUNT + on : -1;
 
     for (int i = 0; i < PLACE_COUNT; i++) {
+        names[i] = place_names[i];
         place_icons[i] = gui_file_icon("", true);
-        if (!strcmp(place_paths[i], folder))
+        if (at < 0 && !strcmp(place_paths[i], folder))
             at = i;
     }
+    for (int i = 0; i < drive_count; i++) {
+        names[PLACE_COUNT + i] = drives[i].name;
+        place_icons[PLACE_COUNT + i] = gui_icon("drive");
+    }
     gui_column_begin(ui, SIDEBAR);
-    if (gui_list_icons(ui, PLACES, place_names, place_icons, PLACE_COUNT, &at, PLACE_COUNT) && at >= 0) {
-        remember();
-        if (strcmp(place_paths[at], RECENT))
-            mkdir(place_paths[at], 0755); // the trash, if nothing's been put there yet
-        read_folder(place_paths[at], NULL);
+    if (gui_list_icons(ui, PLACES, names, place_icons, count, &at, count) && at >= 0) {
+        if (at >= PLACE_COUNT) {
+            open_drive(at - PLACE_COUNT);
+        } else {
+            remember();
+            if (strcmp(place_paths[at], RECENT))
+                mkdir(place_paths[at], 0755); // the trash, if nothing's been put there yet
+            read_folder(place_paths[at], NULL);
+        }
+    }
+    report_drives(gui_last_rect(ui));
+    if (on >= 0) {
+        if (gui_button(ui, "Eject"))
+            eject_drive(on);
+        report(ui, 9, "eject");
     }
     if (gui_dropdown(ui, "##sort", sorts, 3, &by))
         set_sort(by);
@@ -1213,9 +1286,28 @@ int main(int argc, char **argv) {
         dprintf(STDERR_FILENO, "files: there's no %s\n", argv[2]);
     else if (!asked && !read_folder(argc > 1 ? argv[1] : home ? home : "/", NULL))
         read_folder("/", NULL);
+    drives_open();
     gui_ui_init(&ui, window);
     frame(&ui);
-    while (!quitting && gui_next_event(&e) && e.type != GUI_CLOSE) {
+    // The window's events, and udisks2's, as drives come and go.
+    while (!quitting) {
+        int wait, due = gui_due_ms();
+        struct pollfd fds[2] = {{.fd = gui_fd(), .events = POLLIN}, drives_poll(&wait)};
+
+        wait = gui_ready() ? 0 : due >= 0 && (wait < 0 || due < wait) ? due : wait;
+        poll(fds, 2, wait);
+        if (drives_read()) {
+            if (drive_shown() < 0 && strncmp(folder, "/run/media/", 11) == 0)
+                read_folder(place_paths[0], NULL); // the drive shown went
+            frame(&ui);
+        }
+
+        int got = gui_wait_event(&e, 0);
+
+        if (got < 0 || (got && e.type == GUI_CLOSE))
+            break;
+        if (!got)
+            continue;
         if (gui_dropped_file(&e, dropped)) {
             drop_copies = e.key.modifiers & KEY_MOD_CTRL;
             gui_ui_drop(&ui, e.x, e.y);

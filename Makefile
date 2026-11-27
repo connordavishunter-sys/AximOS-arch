@@ -52,6 +52,7 @@ GUI_TOOLS := run notify
 LIBEXEC_TOOLS := login
 LIBS_player := -laudio -lpthread
 LIBS_settings := -laudio -lsystemd
+LIBS_files := -lsystemd # udisks2, for drives
 EXTRA_settings := user/wm/network.c # the network, as wm's tray has it
 FLAGS_settings := -Iuser/wm
 LIBS_login := -lpam

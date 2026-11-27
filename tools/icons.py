@@ -162,6 +162,12 @@ def draw(name):
         i.rect(7.5, 7, 24.5, 27.5, (60, 66, 80), 1.5)
         i.rect(11, 2, 21, 8, GREY_LIGHT, 2)
         lines(i, 10, 22, [12, 17, 22], GREY)
+    elif name == 'drive':  # a USB stick
+        i.rect(11, 2, 21, 10, GREY_LIGHT, 1.5)
+        i.rect(13, 4, 15, 6.5, DIM)
+        i.rect(17, 4, 19, 6.5, DIM)
+        i.rect(8, 9, 24, 30, BLUE, 3)
+        i.rect(12, 14, 20, 16, BLUE_LIGHT, 1)
     elif name == 'file':
         page(i)
     elif name == 'folder':
@@ -279,7 +285,7 @@ def draw(name):
     return i
 
 
-for name in ('bluetooth', 'bluetooth-off'):  # new ones, at 1x too
+for name in ('bluetooth', 'bluetooth-off', 'drive'):  # new ones, at 1x too
     if not os.path.exists(os.path.join(ICONS, name + '.png')):
         draw(name).image.resize((16, 16), Image.LANCZOS).save(os.path.join(ICONS, name + '.png'))
 

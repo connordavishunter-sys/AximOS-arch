@@ -35,7 +35,9 @@ another: the editor, Paint, the viewer and the player open them, Files moves the
 its folder, and the terminal types their paths. Bluetooth has its own panel in the
 tray, BlueZ's: it finds devices nearby, pairs and connects, with wm as BlueZ's agent
 for any code pairing asks to be checked or typed, and PipeWire plays through
-headphones and speakers once they're connected.
+headphones and speakers once they're connected. USB sticks, cards and discs show down
+Files' side as they're plugged in, udisks2's: clicking one mounts it, without a
+password, and Eject unmounts it and powers it off, so it can be taken out.
 
 Still to come: screens beyond the first.
 

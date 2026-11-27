@@ -42,7 +42,7 @@ package_aximos-libgui() {
 
 package_aximos-apps() {
     pkgdesc='AximOS apps: Terminal, Files, Editor, Paint, Viewer, Player, Calculator, Settings, Tasks and Snake'
-    depends=(aximos-libgui)
+    depends=(aximos-libgui systemd-libs udisks2) # udisks2 mounts drives for Files
     _install_all
     _take usr/lib/aximos/apps usr/bin/run usr/bin/notify usr/share/aximos/example_music
     rm "$pkgdir/usr/lib/aximos/apps/System/installer" # aximos-installer's
