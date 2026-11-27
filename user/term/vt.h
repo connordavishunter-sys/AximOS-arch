@@ -22,6 +22,9 @@
 #define ATTR_STRIKE (1u << 29)
 #define ATTR_WIDE (1u << 30) // the first cell of a character two wide
 #define ATTR_ITALIC (1u << 31) // kept, though there's no italic font
+// In a line's last cell, which no column reaches: the line goes on in the next, as it
+// wrapped there, so it's wrapped again at a new width.
+#define LINE_WRAPS (1u << 23)
 // A colour: the default, one of the 256, or red, green and blue.
 #define COLOR_DEFAULT 0
 #define COLOR_INDEX (1u << 24)
@@ -91,6 +94,7 @@ void vt_init(struct session *s);
 void vt_write(const char *bytes, size_t length); // to t, from its program
 void vt_reply(const char *text);                 // to t's program, as if typed
 struct cell *history_line(int i);
+bool line_wraps(const struct cell *line);
 void keep_line(const struct cell *line);
 void mark_all_dirty(void);
 int char_width(uint32_t cp); // in cells: 0, 1 or 2

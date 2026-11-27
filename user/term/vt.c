@@ -91,6 +91,19 @@ static void clear_cells(int r, int from, int to) {
 
 // Keeps a line leaving the top of the screen, losing the oldest when full. A view
 // scrolled back stays on the lines it shows.
+bool line_wraps(const struct cell *line) {
+    return line[MAX_COLS - 1].ch & LINE_WRAPS;
+}
+
+static void line_feed(void);
+
+// The cursor's line goes on in the next, as it's wrapped.
+static void wrap(void) {
+    t->cells[t->row][MAX_COLS - 1].ch |= LINE_WRAPS;
+    t->col = 0;
+    line_feed();
+}
+
 void keep_line(const struct cell *line) {
     struct cell *to = history_line(t->history_count);
 
@@ -106,6 +119,7 @@ void keep_line(const struct cell *line) {
     memcpy(to, line, cols * sizeof(*line));
     for (int c = cols; c < MAX_COLS; c++)
         to[c] = (struct cell){' ', COLOR_DEFAULT, COLOR_DEFAULT};
+    to[MAX_COLS - 1].ch |= line[MAX_COLS - 1].ch & LINE_WRAPS;
     if (t->view) {
         t->view = t->view < t->history_count ? t->view + 1 : t->history_count;
         mark_all_dirty();
@@ -192,16 +206,13 @@ static void put_char(uint32_t cp) {
         cp = line_drawing(cp);
     if (!(width = char_width(cp)))
         return; // marks and joiners have no place of their own here
-    if (t->wrap_next && t->autowrap) {
-        t->col = 0;
-        line_feed();
-    }
+    if (t->wrap_next && t->autowrap)
+        wrap();
     if (width == 2 && t->col == cols - 1) { // doesn't fit: blank the last cell, and wrap
         if (!t->autowrap)
             return;
         clear_cells(t->row, t->col, t->col + 1);
-        t->col = 0;
-        line_feed();
+        wrap();
     }
 
     struct cell *line = t->cells[t->row];

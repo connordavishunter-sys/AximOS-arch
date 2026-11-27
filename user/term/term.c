@@ -603,13 +603,127 @@ static void copy_selection(void) {
 
 static void paint_background(void);
 
-// Fits as many cells as the new size holds, keeping the cursor's line on the
-// screen, and tells the programs on the terminal.
+// How much of a line has text: all of it if it goes on in the next, or else up to
+// its last cell that isn't blank.
+static int text_length(const struct cell *line) {
+    int n = cols;
+
+    if (line_wraps(line))
+        return n;
+    while (n > 0 && (line[n - 1].ch & (CH_MASK | ATTR_REVERSE)) == ' ' && line[n - 1].bg == COLOR_DEFAULT)
+        n--;
+    return n;
+}
+
+// The lines kept and on the primary screen wrapped again at a new width: each that
+// wrapped joined to the next, and what they make split again where it no longer fits,
+// a wide character going whole to the next line. The newest go on the screen, with
+// the cursor where it was in its text, and those before back in what's kept.
+#define REFLOWED (SCROLLBACK + MAX_ROWS) // the newest kept as they're made
+static struct cell *made(struct cell (*out)[MAX_COLS], long i) {
+    return out[i % REFLOWED];
+}
+
+// The next line made, blank, which the one before goes on in if it wraps.
+static void next_line(struct cell (*out)[MAX_COLS], long *n, int *x, bool wraps) {
+    if (wraps)
+        made(out, *n)[MAX_COLS - 1].ch |= LINE_WRAPS;
+    struct cell *line = made(out, ++*n);
+
+    *x = 0;
+    for (int c = 0; c < MAX_COLS; c++)
+        line[c] = (struct cell){' ', COLOR_DEFAULT, COLOR_DEFAULT};
+}
+
+static bool reflow(struct session *s, int new_cols, int new_rows) {
+    struct cell(*out)[MAX_COLS] = malloc(REFLOWED * sizeof(*out));
+    const struct cell blank = {' ', COLOR_DEFAULT, COLOR_DEFAULT};
+    long n = -1, cursor_line = 0;
+    int x = 0, cursor_col = 0, last = s->row;
+
+    if (!out)
+        return false;
+    for (int r = rows - 1; r > s->row; r--) {
+        if (text_length(s->primary[r])) {
+            last = r;
+            break;
+        }
+    }
+
+    int lines = s->history_count + last + 1;
+
+    next_line(out, &n, &x, false);
+    for (int i = 0; i < lines; i++) {
+        const struct cell *line = i < s->history_count ? history_line(i) : s->primary[i - s->history_count];
+        int length = text_length(line);
+        bool cursor = i == s->history_count + s->row;
+        int at = s->col + (s->wrap_next ? 1 : 0); // the cursor's cell, past the last if it's waiting to wrap
+
+        for (int c = 0; c < length; c++) {
+            int width = line[c].ch & ATTR_WIDE ? 2 : 1;
+
+            if (!(line[c].ch & CH_MASK) && c > 0 && line[c - 1].ch & ATTR_WIDE)
+                continue; // the second half of a wide character, which goes with the first
+            if (x + width > new_cols)
+                next_line(out, &n, &x, true);
+            if (cursor && (c == at || (width == 2 && c + 1 == at)))
+                cursor_line = n, cursor_col = x;
+            made(out, n)[x] = line[c];
+            if (width == 2)
+                made(out, n)[x + 1] = line[c + 1];
+            x += width;
+        }
+        if (cursor && at >= length) { // past the text, as after a prompt's space
+            int to = x + at - length;
+
+            for (; to >= new_cols; to -= new_cols)
+                next_line(out, &n, &x, true);
+            cursor_line = n, cursor_col = to;
+        }
+        if (!line_wraps(line) || i == lines - 1)
+            next_line(out, &n, &x, false);
+    }
+
+    // n lines made, and the blank one after them, the newest REFLOWED of those kept: the
+    // screen's are the newest, with the cursor's among them.
+    long first = n >= REFLOWED ? n - REFLOWED + 1 : 0, start = n - new_rows;
+
+    start = start > cursor_line ? cursor_line : start < first ? first : start;
+    long kept_from = start - SCROLLBACK > first ? start - SCROLLBACK : first;
+
+    s->history_start = 0;
+    s->history_count = (int)(start - kept_from);
+    for (long i = kept_from; i < start; i++)
+        memcpy(s->history[i - kept_from], made(out, i), sizeof(s->history[0]));
+    for (int r = 0; r < new_rows; r++) {
+        if (start + r < n)
+            memcpy(s->primary[r], made(out, start + r), sizeof(s->primary[0]));
+        else
+            for (int c = 0; c < MAX_COLS; c++)
+                s->primary[r][c] = blank;
+        for (int c = 0; c < MAX_COLS; c++)
+            s->alternate[r][c] = blank; // not showing, and drawn afresh when it's next shown
+    }
+    s->row = (int)(cursor_line - start);
+    s->col = cursor_col < new_cols ? cursor_col : new_cols - 1;
+    s->selected = false;
+    s->view = 0;
+    free(out);
+    return true;
+}
+
+// Fits the terminal to a new size, and tells the programs on it. The primary screen's
+// wrapped again, unless a full-screen program's on the alternate one, which it draws
+// again itself, and as many cells as fit are kept, with the cursor's line on the screen.
 static void fit(struct session *s, int new_cols, int new_rows) {
     struct session *was = t;
     int lost = s->row - (new_rows - 1);
 
     t = s;
+    if (!s->alternate_screen && reflow(s, new_cols, new_rows)) {
+        lost = 0;
+        goto fitted;
+    }
     if (lost > 0) {
         for (int r = 0; r < lost && !s->alternate_screen; r++)
             keep_line(s->primary[r]);
@@ -625,6 +739,7 @@ static void fit(struct session *s, int new_cols, int new_rows) {
         for (int c = r < kept ? cols : 0; c < new_cols; c++)
             s->primary[r][c] = s->alternate[r][c] = (struct cell){' ', COLOR_DEFAULT, COLOR_DEFAULT};
     }
+fitted:
     s->col = clamp(s->col, 0, new_cols - 1);
     s->view = clamp(s->view, 0, s->history_count);
     s->top = 0;
@@ -645,7 +760,7 @@ static void layout(void) {
 
     top = PADDING + (session_count > 1 ? TAB_BAR : 0);
 
-    int new_cols = clamp((width - 2 * PADDING) / CELL_WIDTH, 1, MAX_COLS);
+    int new_cols = clamp((width - 2 * PADDING) / CELL_WIDTH, 1, MAX_COLS - 1); // the last's for LINE_WRAPS
     int new_rows = clamp((height - top - PADDING) / CELL_HEIGHT, 1, MAX_ROWS);
 
     if (new_cols != cols || new_rows != rows) {
