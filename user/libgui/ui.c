@@ -10,6 +10,7 @@
 #define PADDING 5 // around text in a frame
 #define FRAME_HEIGHT (GUI_CHAR_HEIGHT + 2 * PADDING)
 #define ROW_HEIGHT (GUI_CHAR_HEIGHT + 6) // in lists, menus and dropdowns
+#define MENU_ICON 16 // an icon's size, before a menu item
 #define CHECK_SIZE 16
 #define GRAB_WIDTH 10
 #define SCROLLBAR 10
@@ -1630,9 +1631,9 @@ static void popup_end(struct gui_ui *ui, int bottom) {
     ui->in_popup = false;
 }
 
-// A row in a popup, highlighted when the mouse or the keyboard is on it, or
-// marked. Returns whether it was chosen: let go over, or Enter on it.
-static bool popup_item(struct gui_ui *ui, const char *label, bool keyed, bool marked) {
+// A row in a popup, with its icon if it has one, highlighted when the mouse or the
+// keyboard is on it, or marked. Returns whether it was chosen: let go over, or Enter on it.
+static bool popup_item(struct gui_ui *ui, const char *label, const struct gui_image *icon, bool keyed, bool marked) {
     struct gui_rect r = {ui->popup_rect.x, ui->item_y, ui->item_width, ROW_HEIGHT};
     bool is_over = over(ui, r);
     bool chosen = (is_over && ui->mouse_released) || (keyed && ui->menu_key_count && menu_key(ui, KEY_ENTER));
@@ -1642,8 +1643,12 @@ static bool popup_item(struct gui_ui *ui, const char *label, bool keyed, bool ma
     fill(ui, r.x, r.y, r.width, r.height, POPUP);
     if (is_over || keyed || marked)
         round_fill(ui, r.x + 4, r.y + 1, r.width - 8, r.height - 2, ROUND_SMALL, is_over || keyed ? ACCENT : FRAME_HOT);
-    draw_fitted(ui, r.x + 8, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - 16, label, shown_length(label),
-                is_over || keyed ? ON_ACCENT : TEXT);
+    int text_x = icon ? 8 + MENU_ICON + 8 : 8;
+
+    if (icon)
+        draw_image(ui, r.x + 10, r.y + (ROW_HEIGHT - MENU_ICON) / 2, icon);
+    draw_fitted(ui, r.x + text_x, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - text_x - 8, label,
+                shown_length(label), is_over || keyed ? ON_ACCENT : TEXT);
 
     // What was drawn before it may show what it changes, so the frame goes again.
     ui->again |= chosen;
@@ -1687,7 +1692,7 @@ static void dropdown_popup(struct gui_ui *ui, uint32_t id, struct gui_rect frame
     ui->item_y = inner.y - scroll->offset;
     ui->item_width = inner.width;
     for (int i = 0; i < count; i++) {
-        if (popup_item(ui, items[i], false, i == *selected)) {
+        if (popup_item(ui, items[i], NULL, false, i == *selected)) {
             *selected = i;
             ui->popup = 0;
         }
@@ -2050,6 +2055,10 @@ bool gui_menu(struct gui_ui *ui, const char *label) {
 }
 
 bool gui_menu_item(struct gui_ui *ui, const char *label) {
+    return gui_menu_icon_item(ui, label, NULL);
+}
+
+bool gui_menu_icon_item(struct gui_ui *ui, const char *label, const struct gui_image *icon) {
     struct gui_rect r = {ui->popup_rect.x, ui->item_y, ui->item_width, ROW_HEIGHT};
     int index = ui->item_index;
 
@@ -2057,7 +2066,7 @@ bool gui_menu_item(struct gui_ui *ui, const char *label) {
     if (over(ui, r))
         ui->menu_choice = index;
 
-    bool chosen = popup_item(ui, label, index == ui->menu_choice, false);
+    bool chosen = popup_item(ui, label, icon, index == ui->menu_choice, false);
 
     if (chosen)
         ui->popup = 0;

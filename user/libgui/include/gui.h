@@ -632,6 +632,8 @@ int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, con
 void gui_menu_bar(struct gui_ui *ui);
 bool gui_menu(struct gui_ui *ui, const char *label);
 bool gui_menu_item(struct gui_ui *ui, const char *label);
+// The same, with an icon, gui_icon's, before the label.
+bool gui_menu_icon_item(struct gui_ui *ui, const char *label, const struct gui_image *icon);
 void gui_menu_separator(struct gui_ui *ui);
 void gui_menu_end(struct gui_ui *ui);
 

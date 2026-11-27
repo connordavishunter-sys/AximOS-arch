@@ -589,9 +589,10 @@ static void editing(struct gui_ui *ui) {
     // Right-clicking the text has what the Edit menu has.
     if (gui_context_menu(ui, "##edit", gui_last_rect(ui))) {
         static const char *const items[] = {"Cut", "Copy", "Paste", "Select all"};
+        static const char *const icons[] = {"cut", "copy", "clipboard", "select-all"};
 
         for (int i = 0; i < 4; i++) {
-            if (gui_menu_item(ui, items[i]))
+            if (gui_menu_icon_item(ui, items[i], gui_icon(icons[i])))
                 send_key(ui, "xcva"[i]);
         }
         gui_menu_end(ui);

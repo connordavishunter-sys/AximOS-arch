@@ -5814,29 +5814,29 @@ static void open_desktop_menu(int index) {
         char editor[GUI_PATH_MAX];
 
         desktop_path(index, popup_file);
-        add_item(p, ACT_OPEN, "Open", NULL, NULL);
+        add_item(p, ACT_OPEN, "Open", NULL, gui_icon("open"));
         if (!folder && gui_app_path("editor", editor))
-            add_item(p, ACT_OPEN_IN, "Open in Editor", editor, NULL);
+            add_item(p, ACT_OPEN_IN, "Open in Editor", editor, app_icon("editor"));
         if (!folder)
-            add_item(p, ACT_OPEN_WITH, "Open with", NULL, NULL);
+            add_item(p, ACT_OPEN_WITH, "Open with", NULL, gui_icon("open"));
         if (!folder && gui_is_program(popup_file))
-            add_item(p, ACT_RUN_FILE, "Run", NULL, NULL);
+            add_item(p, ACT_RUN_FILE, "Run", NULL, app_icon(RUN_COMMAND));
         add_item(p, ACT_LINE, "", NULL, NULL);
-        add_item(p, ACT_CUT, "Cut", NULL, NULL);
-        add_item(p, ACT_COPY, "Copy", NULL, NULL);
-        add_item(p, ACT_COPY_PATH, "Copy path", NULL, NULL);
-        add_item(p, ACT_RENAME, "Rename", NULL, NULL);
-        add_item(p, ACT_DELETE, "Delete", NULL, NULL);
+        add_item(p, ACT_CUT, "Cut", NULL, gui_icon("cut"));
+        add_item(p, ACT_COPY, "Copy", NULL, gui_icon("copy"));
+        add_item(p, ACT_COPY_PATH, "Copy path", NULL, gui_icon("link"));
+        add_item(p, ACT_RENAME, "Rename", NULL, gui_icon("rename"));
+        add_item(p, ACT_DELETE, "Delete", NULL, gui_icon("delete"));
         add_item(p, ACT_LINE, "", NULL, NULL);
-        add_item(p, ACT_PROPERTIES, "Properties", NULL, NULL);
+        add_item(p, ACT_PROPERTIES, "Properties", NULL, gui_icon("info"));
     } else {
-        add_item(p, ACT_NEW_FOLDER, "New folder", NULL, NULL);
-        add_item(p, ACT_NEW_FILE, "New file", NULL, NULL);
+        add_item(p, ACT_NEW_FOLDER, "New folder", NULL, gui_icon("new-folder"));
+        add_item(p, ACT_NEW_FILE, "New file", NULL, gui_icon("new-file"));
         add_item(p, ACT_LINE, "", NULL, NULL);
-        add_item(p, ACT_REFRESH, "Refresh", NULL, NULL);
+        add_item(p, ACT_REFRESH, "Refresh", NULL, gui_icon("refresh"));
         add_check(p, ACT_SHOW_ICONS, "Show icons", !settings.hide_icons);
         add_item(p, ACT_LINE, "", NULL, NULL);
-        add_item(p, ACT_SETTINGS, "Settings", NULL, NULL);
+        add_item(p, ACT_SETTINGS, "Settings", NULL, gui_icon("gear"));
     }
     place_popup(p, cursor_x, cursor_y, MENU_WIDTH);
     p->choice = -1;
@@ -5854,13 +5854,14 @@ static void open_window_menu(struct window *w) {
     close_menu();
     menu_window = w;
     p->count = 0;
-    add_item(p, w->minimized ? ACT_WIN_SHOW : ACT_WIN_MINIMIZE, w->minimized ? "Restore" : "Minimize", NULL, NULL);
+    add_item(p, w->minimized ? ACT_WIN_SHOW : ACT_WIN_MINIMIZE, w->minimized ? "Restore" : "Minimize", NULL,
+             gui_icon(w->minimized ? "restore" : "minimize"));
     if (framed(w))
-        add_item(p, ACT_WIN_MAXIMIZE, w->tiled ? "Restore size" : "Maximize", NULL, NULL);
+        add_item(p, ACT_WIN_MAXIMIZE, w->tiled ? "Restore size" : "Maximize", NULL, gui_icon(w->tiled ? "restore" : "maximize"));
     if (!w->bare)
-        add_item(p, ACT_WIN_FULLSCREEN, w->fullscreen ? "Leave full screen" : "Full screen", NULL, NULL);
+        add_item(p, ACT_WIN_FULLSCREEN, w->fullscreen ? "Leave full screen" : "Full screen", NULL, gui_icon("fullscreen"));
     add_item(p, ACT_LINE, "", NULL, NULL);
-    add_item(p, ACT_WIN_CLOSE, "Close", NULL, NULL);
+    add_item(p, ACT_WIN_CLOSE, "Close", NULL, gui_icon("close"));
     place_popup(p, cursor_x, 0, MENU_WIDTH);
     p->r.y = beside_bar(p->r.height);
     p->choice = -1;
@@ -5873,7 +5874,7 @@ static void open_taskbar_menu(void) {
     close_panel();
     close_menu();
     p->count = 0;
-    add_item(p, ACT_POSITION, "Position", NULL, NULL);
+    add_item(p, ACT_POSITION, "Position", NULL, gui_icon("position"));
     add_check(p, ACT_AUTOHIDE, "Autohide taskbar", settings.autohide);
     place_popup(p, cursor_x, 0, MENU_WIDTH);
     p->r.y = beside_bar(p->r.height);

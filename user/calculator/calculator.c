@@ -192,9 +192,9 @@ static void frame(struct gui_ui *ui) {
     }
     gui_column_end(ui);
     if (gui_context_menu(ui, "##display", display)) {
-        if (gui_menu_item(ui, "Copy"))
+        if (gui_menu_icon_item(ui, "Copy", gui_icon("copy")))
             copy_answer();
-        if (gui_menu_item(ui, "Paste"))
+        if (gui_menu_icon_item(ui, "Paste", gui_icon("clipboard")))
             paste_number();
         gui_menu_end(ui);
     }

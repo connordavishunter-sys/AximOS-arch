@@ -1045,63 +1045,63 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
     char path[PATH_MAX];
 
     if (e && in_trash()) {
-        if (gui_menu_item(ui, "Restore"))
+        if (gui_menu_icon_item(ui, "Restore", gui_icon("undo")))
             dispose(RESTORE);
-        if (gui_menu_item(ui, "Delete for good"))
+        if (gui_menu_icon_item(ui, "Delete for good", gui_icon("delete")))
             ask_about(DELETING);
         gui_menu_separator(ui);
-        if (gui_menu_item(ui, "Properties"))
+        if (gui_menu_icon_item(ui, "Properties", gui_icon("info")))
             ask_about(PROPERTIES);
     } else if (e) {
         path_of(path, e->name);
-        if (gui_menu_item(ui, "Open"))
+        if (gui_menu_icon_item(ui, "Open", gui_icon("open")))
             open_selected();
-        if (e->folder && gui_menu_item(ui, "Open in new tab"))
+        if (e->folder && gui_menu_icon_item(ui, "Open in new tab", gui_icon("add")))
             new_tab(path);
-        if (!e->folder && gui_menu_item(ui, "Open in Editor"))
+        if (!e->folder && gui_menu_icon_item(ui, "Open in Editor", gui_icon("apps/editor")))
             open_in("editor");
-        if (!e->folder && gui_menu_item(ui, "Open with..."))
+        if (!e->folder && gui_menu_icon_item(ui, "Open with...", gui_icon("open")))
             ask_about(OPENING_WITH);
-        if (!e->folder && gui_is_program(path) && gui_menu_item(ui, "Run"))
+        if (!e->folder && gui_is_program(path) && gui_menu_icon_item(ui, "Run", gui_icon("apps/run")))
             run_selected();
         gui_menu_separator(ui);
-        if (gui_menu_item(ui, "Cut"))
+        if (gui_menu_icon_item(ui, "Cut", gui_icon("cut")))
             copy_selected(true);
-        if (gui_menu_item(ui, "Copy"))
+        if (gui_menu_icon_item(ui, "Copy", gui_icon("copy")))
             copy_selected(false);
-        if (gui_menu_item(ui, "Copy path"))
+        if (gui_menu_icon_item(ui, "Copy path", gui_icon("link")))
             copy_path();
-        if (can_rename() && gui_menu_item(ui, "Rename"))
+        if (can_rename() && gui_menu_icon_item(ui, "Rename", gui_icon("rename")))
             ask_about(RENAMING);
-        if (gui_menu_item(ui, "Delete"))
+        if (gui_menu_icon_item(ui, "Delete", gui_icon("delete")))
             dispose(TRASH);
         gui_menu_separator(ui);
-        if (gui_menu_item(ui, "Properties"))
+        if (gui_menu_icon_item(ui, "Properties", gui_icon("info")))
             ask_about(PROPERTIES);
     } else if (in_trash()) {
-        if (gui_menu_item(ui, "Empty trash"))
+        if (gui_menu_icon_item(ui, "Empty trash", gui_icon("delete")))
             ask_about(EMPTYING);
-        if (gui_menu_item(ui, "Refresh"))
+        if (gui_menu_icon_item(ui, "Refresh", gui_icon("refresh")))
             refresh();
     } else if (in_recent()) {
-        if (gui_menu_item(ui, "Clear recent")) {
+        if (gui_menu_icon_item(ui, "Clear recent", gui_icon("delete"))) {
             gui_recent_clear();
             printf("files: cleared recent\n");
             refresh();
         }
-        if (gui_menu_item(ui, "Refresh"))
+        if (gui_menu_icon_item(ui, "Refresh", gui_icon("refresh")))
             refresh();
     } else {
-        if (gui_menu_item(ui, "New folder"))
+        if (gui_menu_icon_item(ui, "New folder", gui_icon("new-folder")))
             make_new(true);
-        if (gui_menu_item(ui, "New file"))
+        if (gui_menu_icon_item(ui, "New file", gui_icon("new-file")))
             make_new(false);
-        if (gui_menu_item(ui, "Paste"))
+        if (gui_menu_icon_item(ui, "Paste", gui_icon("clipboard")))
             paste();
         gui_menu_separator(ui);
-        if (gui_menu_item(ui, "Open terminal here"))
+        if (gui_menu_icon_item(ui, "Open terminal here", gui_icon("apps/term")))
             start_app("term", NULL, folder);
-        if (gui_menu_item(ui, "Refresh"))
+        if (gui_menu_icon_item(ui, "Refresh", gui_icon("refresh")))
             refresh();
     }
     gui_menu_end(ui);

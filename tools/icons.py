@@ -141,6 +141,90 @@ def draw(name):
         i.line([(16, 4), (16, 26)], GREY, 4)
         i.poly([(16, 11), (30, 18), (30, 21), (16, 17), (2, 21), (2, 18)], GREY)
         i.poly([(16, 23), (22, 27), (22, 29), (16, 27.5), (10, 29), (10, 27)], GREY)
+    elif name == 'add':
+        i.line([(16, 6), (16, 26)], GREY_LIGHT, 3.5)
+        i.line([(6, 16), (26, 16)], GREY_LIGHT, 3.5)
+    elif name == 'close':
+        i.line([(8, 8), (24, 24)], GREY_LIGHT, 3.5)
+        i.line([(24, 8), (8, 24)], GREY_LIGHT, 3.5)
+    elif name == 'copy':
+        i.rect(10, 3, 27, 22, GREY_LIGHT, 2.5)
+        i.rect(12.5, 5.5, 24.5, 19.5, (60, 66, 80), 1.5)
+        i.rect(5, 10, 22, 29, GREY_LIGHT, 2.5)
+        i.rect(7.5, 12.5, 19.5, 26.5, PAPER, 1.5)
+    elif name == 'cut':
+        i.circle(9, 24, 4.5, outline=GREY_LIGHT, width=2.5)
+        i.circle(23, 24, 4.5, outline=GREY_LIGHT, width=2.5)
+        i.line([(11.5, 20.5), (22, 4)], GREY_LIGHT, 2.5)
+        i.line([(20.5, 20.5), (10, 4)], GREY_LIGHT, 2.5)
+    elif name == 'delete':
+        i.rect(5, 6, 27, 9.5, GREY_LIGHT, 1.5)
+        i.rect(12, 3, 20, 7, GREY_LIGHT, 1.5)
+        i.poly([(7.5, 11), (24.5, 11), (23, 29), (9, 29)], GREY_LIGHT)
+        for x in (12.5, 16, 19.5):
+            i.line([(x, 14), (x, 26)], (60, 66, 80), 1.8)
+    elif name == 'find':
+        i.circle(13, 13, 8.5, outline=GREY_LIGHT, width=3)
+        i.line([(19.5, 19.5), (28, 28)], GREY_LIGHT, 4)
+    elif name == 'fullscreen':
+        for (x, y, dx, dy) in ((4, 4, 1, 1), (28, 4, -1, 1), (4, 28, 1, -1), (28, 28, -1, -1)):
+            i.line([(x, y + dy * 8), (x, y), (x + dx * 8, y)], GREY_LIGHT, 3)
+    elif name == 'gear':
+        gear(i, GREY_LIGHT)
+    elif name == 'info':
+        i.circle(16, 16, 13, fill=BLUE_LIGHT)
+        i.circle(16, 9.5, 2.2, fill=WHITE)
+        i.rect(14.2, 13.5, 17.8, 24, WHITE, 1)
+    elif name == 'keyboard':
+        i.rect(2, 8, 30, 25, GREY_LIGHT, 2.5)
+        for y in (11, 15.5):
+            for col in range(6):
+                i.rect(5 + col * 4, y, 7.5 + col * 4, y + 2.5, (60, 66, 80), 0.5)
+        i.rect(9, 20, 23, 22.5, (60, 66, 80), 0.5)
+    elif name == 'link':
+        i.rect(3, 11, 17, 21, outline=GREY_LIGHT, width=2.5, radius=5)
+        i.rect(15, 11, 29, 21, outline=GREY_LIGHT, width=2.5, radius=5)
+    elif name == 'maximize':
+        i.rect(5, 6, 27, 26, outline=GREY_LIGHT, width=2.5, radius=2)
+        i.rect(5, 6, 27, 11, GREY_LIGHT, 2)
+    elif name == 'minimize':
+        i.line([(7, 22), (25, 22)], GREY_LIGHT, 3.5)
+    elif name == 'new-file':
+        page(i, 4, 22)
+        i.circle(23, 23, 7, fill=GREEN)
+        i.line([(23, 19), (23, 27)], WHITE, 2.2)
+        i.line([(19, 23), (27, 23)], WHITE, 2.2)
+    elif name == 'new-folder':
+        folder(i, YELLOW_DARK, YELLOW)
+        i.circle(23, 22, 7, fill=GREEN)
+        i.line([(23, 18), (23, 26)], WHITE, 2.2)
+        i.line([(19, 22), (27, 22)], WHITE, 2.2)
+    elif name == 'open':
+        folder(i, YELLOW_DARK, YELLOW)
+        i.poly([(6, 27), (10, 14), (31, 14), (27, 27)], (255, 222, 120))
+    elif name == 'position':
+        i.rect(3, 5, 29, 27, outline=GREY_LIGHT, width=2.5, radius=2.5)
+        i.rect(6, 20, 26, 24, BLUE_LIGHT, 1)
+    elif name == 'refresh':
+        i.arc(16, 16, 10, -40, 250, GREY_LIGHT, 3)
+        i.poly([(23, 2), (28, 11), (19, 11)], GREY_LIGHT)
+    elif name == 'rename':
+        i.line([(26, 6), (11, 21)], ORANGE, 4.5)
+        i.poly([(8.5, 19.5), (12.5, 23.5), (6, 26)], (90, 70, 50))
+        i.line([(4, 29), (28, 29)], GREY_LIGHT, 2)
+    elif name == 'restore':
+        i.rect(10, 4, 28, 20, outline=GREY_LIGHT, width=2.5, radius=2)
+        i.rect(4, 12, 22, 28, (60, 66, 80), 2)
+        i.rect(4, 12, 22, 28, outline=GREY_LIGHT, width=2.5, radius=2)
+    elif name == 'select-all':
+        for x0, y0, x1, y1 in ((4, 4, 28, 4), (28, 4, 28, 28), (28, 28, 4, 28), (4, 28, 4, 4)):
+            for n in range(4):
+                a, b = n / 4, (n + 0.55) / 4
+                i.line([(x0 + (x1 - x0) * a, y0 + (y1 - y0) * a), (x0 + (x1 - x0) * b, y0 + (y1 - y0) * b)], GREY_LIGHT, 2.5)
+        i.rect(10, 10, 22, 22, BLUE_LIGHT, 1.5)
+    elif name == 'undo':
+        i.arc(17, 18, 9, 200, 450, GREY_LIGHT, 3)
+        i.poly([(3, 12), (12, 6), (12, 18)], GREY_LIGHT)
     elif name == 'audio':
         page(i)
         note(i, RED, 14, 10)
@@ -285,7 +369,7 @@ def draw(name):
     return i
 
 
-for name in ('bluetooth', 'bluetooth-off', 'drive'):  # new ones, at 1x too
+for name in ('bluetooth', 'bluetooth-off', 'drive') + ('add', 'close', 'copy', 'cut', 'delete', 'find', 'fullscreen', 'gear', 'info', 'keyboard', 'link', 'maximize', 'minimize', 'new-file', 'new-folder', 'open', 'position', 'refresh', 'rename', 'restore', 'select-all', 'undo'):  # new ones, at 1x too
     if not os.path.exists(os.path.join(ICONS, name + '.png')):
         draw(name).image.resize((16, 16), Image.LANCZOS).save(os.path.join(ICONS, name + '.png'))
 
