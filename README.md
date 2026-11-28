@@ -1,3 +1,7 @@
+> **AI disclosure:** all of the code from this repository's owner is written by Claude
+> Opus 5.5, in Claude Code. Contributions from others say in their pull request which AI
+> tools, if any, helped write them.
+
 # AximOS on Arch
 
 AximOS's desktop on Arch Linux: **wm**, AximOS's window manager, as a Wayland compositor

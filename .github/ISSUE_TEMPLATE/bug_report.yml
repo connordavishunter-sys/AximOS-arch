@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in AximOS doesn't work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        1. Opened Files and plugged in a USB stick
+        2. Clicked it in the side bar
+        3. Expected it to open, but Files showed "Not authorized"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - The live ISO
+        - An installed system
+        - The QEMU VM, from the tests
+        - wm nested in another desktop
+    validations:
+      required: true
+  - type: dropdown
+    id: scale
+    attributes:
+      label: Scale
+      description: 2x is screens 2560 wide or more.
+      options:
+        - 1x
+        - 2x
+        - Both
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From `pacman -Q aximos-desktop`.
+      placeholder: 0.1.0.r28.g628153c
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: The GPU especially, and the screen's size, if it's to do with drawing.
+      placeholder: Intel i7 laptop, Intel Iris Xe, 1920x1080
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: >-
+        If it's something you can see. `kill -USR1` on wm saves the screen to
+        `$XDG_RUNTIME_DIR/wm-screen.png`.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: wm's log, `journalctl -b -t wm`, if anything in it looks to be about this.
+      render: text
