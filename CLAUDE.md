@@ -16,7 +16,9 @@ together; docs/scene.md covers the GPU compositing. This file is how we work on 
    through Settings → Updates.
 
 Publishing needs AximOS's signing key, so only the maintainer does step 4. Contributors
-stop at a tested change, and open a pull request.
+stop at a tested change, and open a pull request, as CONTRIBUTING.md says: with a test
+for a new feature, passing at 1x and 2x, before and after screenshots for anything that
+looks different, and docs updated. Say in it that Claude Code helped.
 
 rN is the commit count (`git rev-list --count HEAD`, the `.rN.` in `VERSION`), so a
 release made of two commits skips a number. Say the number it'll actually be.

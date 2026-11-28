@@ -136,3 +136,12 @@ It boots straight into the desktop as `aximos`, whose password, for the lock scr
 UPower, `nvidia-open` for NVIDIA's GPUs, `foot`, `xterm` and DejaVu's fonts. The serial port has a root
 shell, for the tests, and hostapd and dnsmasq, which the Wi-Fi test makes access points
 of simulated radios with.
+
+## Contributing
+
+CONTRIBUTING.md says how to send a change: fork, test in the VM, and open a pull
+request. Bugs go in Issues, and questions and ideas in Discussions.
+
+## License
+
+GNU General Public License, version 3 or later: LICENSE.

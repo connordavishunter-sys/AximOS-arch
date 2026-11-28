@@ -9,7 +9,7 @@ pkgrel=1
 pkgdesc='AximOS desktop'
 arch=(x86_64)
 url='https://github.com/connordavishunter-sys/AximOS-arch'
-license=(custom)
+license=('GPL-3.0-or-later')
 makedepends=(wlroots0.20 scenefx wayland wayland-protocols libinput libxkbcommon pixman libdrm libpulse pam stb
              mpg123 lame flac libvorbis libogg opus faad2 faac libxcrypt)
 source=(aximos.tar.gz keyring.tar.gz)
